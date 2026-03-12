@@ -301,3 +301,18 @@ Entries:
     - version0.1.5_updates
   - Notes:
     - The post-setup status now reminds users to log out and back in, then rerun the ROCm check, so new `render`/`video` group membership is more likely to be applied before launching ComfyUI.
+- 2026-03-12
+  - Added the same logout/login reminder to the fake AMD install-test completion path.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Fake AMD guided ROCm test mode no longer skips the group-refresh reminder just because runtime validation is intentionally bypassed.
+- 2026-03-12
+  - Hid the ROCm setup controls once the runtime check reports the system is ready.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - `Check ROCm` and `Guided ROCm Setup` are now shown only while ROCm still needs setup or confirmation.
+    - On ready systems, the ROCm setup section no longer stays visible for AMD/ROCm users.

@@ -945,7 +945,7 @@ fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, Str
         emit_rocm_guided_event(
             app,
             "step",
-            "Fake AMD install-test mode is active. Skipping ROCm runtime validation because no real AMD GPU is present.",
+            "Fake AMD install-test mode is active. Runtime validation is skipped because no real AMD GPU is present. If guided setup changed your groups, log out and back in before real use.",
         );
         return Ok(RocmGuidedStatus {
             distro_family: family,
@@ -955,7 +955,7 @@ fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, Str
             gpu_name,
             ready: true,
             requires_relogin: false,
-            detail: "ROCm package installation finished. Runtime validation is skipped in fake AMD install-test mode.".to_string(),
+            detail: "ROCm package installation finished. Runtime validation is skipped in fake AMD install-test mode. If guided setup changed your groups, log out and back in before real use.".to_string(),
         });
     }
 

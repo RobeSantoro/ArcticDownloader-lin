@@ -439,7 +439,9 @@ function setTorchRecommendedDetecting(detecting) {
 
 function updateRocmGuidedUi() {
   const profile = String(el.comfyTorchProfile?.value || "").trim();
-  const show = state.comfyDetectedGpuVendor === "amd" || profile === "torch291_rocm64";
+  const status = state.rocmGuidedStatus;
+  const rocmRelevant = state.comfyDetectedGpuVendor === "amd" || profile === "torch291_rocm64";
+  const show = rocmRelevant && !status?.ready;
   if (el.rocmGuidedRow) {
     el.rocmGuidedRow.classList.toggle("hidden", !show);
   }
@@ -449,7 +451,6 @@ function updateRocmGuidedUi() {
   if (!show) {
     return;
   }
-  const status = state.rocmGuidedStatus;
   if (el.rocmGuidedStatus) {
     el.rocmGuidedStatus.textContent = status?.detail
       ? `ROCm status: ${status.detail}`
