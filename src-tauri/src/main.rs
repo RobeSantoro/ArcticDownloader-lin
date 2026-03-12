@@ -8,6 +8,8 @@ use arctic_downloader::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::VecDeque,
+    io::BufRead,
     io::IsTerminal,
     net::{TcpStream, ToSocketAddrs},
     path::{Path, PathBuf},
@@ -141,11 +143,33 @@ struct ComfyPreflightResponse {
     items: Vec<PreflightItem>,
 }
 
+#[derive(Debug, Serialize)]
+struct RocmGuidedStatus {
+    distro_family: String,
+    distro_label: String,
+    supported: bool,
+    amd_detected: bool,
+    gpu_name: Option<String>,
+    ready: bool,
+    requires_relogin: bool,
+    detail: String,
+}
+
 #[derive(Clone, Debug)]
 struct LinuxPrereqScan {
     distro: String,
     missing_required: Vec<String>,
     missing_optional: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LinuxOsRelease {
+    id: String,
+    id_like: String,
+    version_id: String,
+    version_codename: String,
+    ubuntu_codename: String,
+    pretty_name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -261,16 +285,9 @@ fn linux_prereq_cache() -> &'static Mutex<Option<LinuxPrereqScan>> {
 }
 
 fn detect_linux_distro_family() -> String {
-    let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let mut id = String::new();
-    let mut id_like = String::new();
-    for line in os_release.lines() {
-        if let Some(value) = line.strip_prefix("ID=") {
-            id = value.trim_matches('"').to_ascii_lowercase();
-        } else if let Some(value) = line.strip_prefix("ID_LIKE=") {
-            id_like = value.trim_matches('"').to_ascii_lowercase();
-        }
-    }
+    let os_release = detect_linux_os_release();
+    let id = os_release.id;
+    let id_like = os_release.id_like;
     let haystack = format!("{id} {id_like}");
     if haystack.contains("arch") {
         "arch".to_string()
@@ -281,6 +298,35 @@ fn detect_linux_distro_family() -> String {
         "fedora".to_string()
     } else {
         "unknown".to_string()
+    }
+}
+
+fn detect_linux_os_release() -> LinuxOsRelease {
+    #[cfg(not(target_os = "linux"))]
+    {
+        LinuxOsRelease::default()
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let os_release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+        let mut info = LinuxOsRelease::default();
+        for line in os_release.lines() {
+            if let Some(value) = line.strip_prefix("ID=") {
+                info.id = value.trim_matches('"').to_ascii_lowercase();
+            } else if let Some(value) = line.strip_prefix("ID_LIKE=") {
+                info.id_like = value.trim_matches('"').to_ascii_lowercase();
+            } else if let Some(value) = line.strip_prefix("VERSION_ID=") {
+                info.version_id = value.trim_matches('"').to_ascii_lowercase();
+            } else if let Some(value) = line.strip_prefix("VERSION_CODENAME=") {
+                info.version_codename = value.trim_matches('"').to_ascii_lowercase();
+            } else if let Some(value) = line.strip_prefix("UBUNTU_CODENAME=") {
+                info.ubuntu_codename = value.trim_matches('"').to_ascii_lowercase();
+            } else if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
+                info.pretty_name = value.trim_matches('"').to_string();
+            }
+        }
+        info
     }
 }
 
@@ -575,7 +621,430 @@ fn detect_amd_gpu_details() -> AmdGpuDetails {
 }
 
 fn detect_amd_gpu_name() -> Option<String> {
+    if fake_amd_enabled() {
+        return Some("Fake AMD GPU (simulation)".to_string());
+    }
     detect_amd_gpu_details().name
+}
+
+fn fake_amd_enabled() -> bool {
+    std::env::var("ARCTIC_FAKE_AMD")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn fake_amd_allow_rocm_setup_enabled() -> bool {
+    std::env::var("ARCTIC_FAKE_AMD_ALLOW_ROCM_SETUP")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn user_in_group(group: &str) -> bool {
+    let user = std::env::var("USER").unwrap_or_default();
+    if user.is_empty() {
+        return false;
+    }
+    let (stdout, _) = match run_command_capture("id", &["-nG", &user], None) {
+        Ok(out) => out,
+        Err(_) => return false,
+    };
+    stdout
+        .split_whitespace()
+        .any(|value| value.trim().eq_ignore_ascii_case(group))
+}
+
+fn rocminfo_command() -> Option<String> {
+    if command_available("rocminfo", &["--help"]) {
+        return Some("rocminfo".to_string());
+    }
+    let alt = "/opt/rocm/bin/rocminfo";
+    if Path::new(alt).exists() {
+        return Some(alt.to_string());
+    }
+    None
+}
+
+fn rocm_runtime_ready() -> (bool, bool, Vec<String>) {
+    let mut notes: Vec<String> = Vec::new();
+    let rocminfo_cmd = rocminfo_command();
+    let has_rocminfo_bin = rocminfo_cmd.is_some();
+    if !has_rocminfo_bin {
+        notes.push("`rocminfo` is not installed.".to_string());
+    }
+
+    let has_dev_kfd = Path::new("/dev/kfd").exists();
+    if !has_dev_kfd {
+        notes.push("/dev/kfd is missing.".to_string());
+    }
+
+    let render_ok = user_in_group("render");
+    let video_ok = user_in_group("video");
+    if !render_ok || !video_ok {
+        notes.push("Current user is not yet in both `render` and `video` groups.".to_string());
+    }
+
+    let rocminfo_ok = if let Some(cmd) = rocminfo_cmd.as_deref() {
+        run_command_capture(cmd, &[], None)
+            .map(|(stdout, _)| stdout.to_ascii_lowercase().contains("agent"))
+            .unwrap_or(false)
+    } else {
+        false
+    };
+    if has_rocminfo_bin && !rocminfo_ok {
+        notes.push("`rocminfo` did not report a usable ROCm agent.".to_string());
+    }
+
+    let runtime_partially_present = has_rocminfo_bin || has_dev_kfd;
+    let requires_relogin = runtime_partially_present && (!render_ok || !video_ok);
+
+    (has_rocminfo_bin && has_dev_kfd && rocminfo_ok, requires_relogin, notes)
+}
+
+fn rocm_supported_for_distro(os: &LinuxOsRelease, family: &str) -> bool {
+    match family {
+        "arch" | "fedora" => true,
+        "debian" => {
+            let code = if !os.ubuntu_codename.is_empty() {
+                os.ubuntu_codename.as_str()
+            } else {
+                os.version_codename.as_str()
+            };
+            matches!(code, "jammy" | "noble")
+                || matches!(os.version_id.as_str(), "12" | "13" | "22.04" | "24.04")
+        }
+        _ => false,
+    }
+}
+
+fn emit_rocm_guided_event(app: &AppHandle, phase: &str, message: &str) {
+    let _ = app.emit(
+        "comfyui-install-progress",
+        DownloadProgressEvent {
+            kind: "comfyui_install".to_string(),
+            phase: phase.to_string(),
+            artifact: None,
+            index: None,
+            total: None,
+            received: None,
+            size: None,
+            folder: None,
+            message: Some(message.to_string()),
+        },
+    );
+}
+
+fn stream_command_output(
+    app: &AppHandle,
+    phase: &'static str,
+    stream_name: &'static str,
+    reader: impl std::io::Read + Send + 'static,
+    tail: std::sync::Arc<Mutex<VecDeque<String>>>,
+) -> std::thread::JoinHandle<()> {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let buffered = std::io::BufReader::new(reader);
+        for line in buffered.lines().map_while(Result::ok) {
+            let text = line.trim_end().to_string();
+            if text.is_empty() {
+                continue;
+            }
+            if let Ok(mut lines) = tail.lock() {
+                if lines.len() >= 12 {
+                    lines.pop_front();
+                }
+                lines.push_back(format!("[{stream_name}] {text}"));
+            }
+            emit_rocm_guided_event(&app, phase, &text);
+        }
+    })
+}
+
+fn run_command_streaming_with_env(
+    app: &AppHandle,
+    phase: &'static str,
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    envs: &[(&str, &str)],
+) -> Result<(), String> {
+    log::debug!("run_command_streaming_with_env: {} {}", program, args.join(" "));
+    let mut cmd = build_command(program, args, working_dir, envs)?;
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| format!("Failed to run {program}: {err}"))?;
+
+    let tail = std::sync::Arc::new(Mutex::new(VecDeque::<String>::new()));
+    let stdout_handle = child.stdout.take().map(|stdout| {
+        stream_command_output(app, phase, "stdout", stdout, tail.clone())
+    });
+    let stderr_handle = child.stderr.take().map(|stderr| {
+        stream_command_output(app, phase, "stderr", stderr, tail.clone())
+    });
+
+    let status = child
+        .wait()
+        .map_err(|err| format!("Failed to wait for {program}: {err}"))?;
+
+    if let Some(handle) = stdout_handle {
+        let _ = handle.join();
+    }
+    if let Some(handle) = stderr_handle {
+        let _ = handle.join();
+    }
+
+    if !status.success() {
+        let detail = tail
+            .lock()
+            .ok()
+            .map(|lines| lines.iter().cloned().collect::<Vec<_>>().join(" | "))
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "no command output captured".to_string());
+        return Err(format!(
+            "Command failed: {} {} :: {}",
+            program,
+            args.join(" "),
+            detail
+        ));
+    }
+    Ok(())
+}
+
+fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, String> {
+    let os = detect_linux_os_release();
+    let family = detect_linux_distro_family();
+    let gpu_name = detect_amd_gpu_name();
+    let supported = rocm_supported_for_distro(&os, &family);
+    let distro_label = if os.pretty_name.trim().is_empty() {
+        family.clone()
+    } else {
+        os.pretty_name.clone()
+    };
+
+    if gpu_name.is_none() {
+        return Ok(RocmGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported,
+            amd_detected: false,
+            gpu_name: None,
+            ready: false,
+            requires_relogin: false,
+            detail: "AMD GPU not detected on this system.".to_string(),
+        });
+    }
+
+    if fake_amd_enabled() && !fake_amd_allow_rocm_setup_enabled() {
+        emit_rocm_guided_event(
+            app,
+            "warn",
+            "Fake AMD mode enabled. Guided ROCm setup is disabled to avoid modifying a non-AMD system.",
+        );
+        return Ok(RocmGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported: false,
+            amd_detected: true,
+            gpu_name,
+            ready: false,
+            requires_relogin: false,
+            detail: "Fake AMD mode is active. UI testing is enabled, but guided ROCm setup is disabled.".to_string(),
+        });
+    }
+
+    if !supported {
+        return Ok(RocmGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported: false,
+            amd_detected: true,
+            gpu_name,
+            ready: false,
+            requires_relogin: false,
+            detail: "Guided ROCm setup is currently supported only for Debian-based, Fedora, and Arch Linux families.".to_string(),
+        });
+    }
+
+    match family.as_str() {
+        "arch" => {
+            let mut steps = vec![
+                "echo Refreshing pacman package metadata for ROCm setup...".to_string(),
+                "pacman -Sy".to_string(),
+                "echo Installing ROCm packages with pacman...".to_string(),
+                "pacman -S --needed --noconfirm rocminfo rocm-hip-sdk rocm-opencl-sdk".to_string(),
+            ];
+            if let Ok(user) = std::env::var("USER") {
+                if !user.trim().is_empty() {
+                    steps.extend(rocm_group_setup_steps(&user));
+                }
+            }
+            run_privileged_shell_streaming(app, &steps.join(" && "), None)?;
+        }
+        "fedora" => {
+            let mut steps = vec![
+                "echo Refreshing dnf metadata for ROCm setup...".to_string(),
+                "dnf makecache".to_string(),
+                "echo Installing ROCm packages with dnf...".to_string(),
+                "dnf install -y rocminfo rocm-hip rocm-opencl".to_string(),
+            ];
+            if let Ok(user) = std::env::var("USER") {
+                if !user.trim().is_empty() {
+                    steps.extend(rocm_group_setup_steps(&user));
+                }
+            }
+            run_privileged_shell_streaming(app, &steps.join(" && "), None)?;
+        }
+        "debian" => {
+            let ubuntu_code = if !os.ubuntu_codename.is_empty() {
+                os.ubuntu_codename.clone()
+            } else if matches!(os.version_id.as_str(), "12") {
+                "jammy".to_string()
+            } else if matches!(os.version_id.as_str(), "13") {
+                "noble".to_string()
+            } else {
+                os.version_codename.clone()
+            };
+            if !matches!(ubuntu_code.as_str(), "jammy" | "noble") {
+                return Err(format!(
+                    "Guided ROCm setup currently supports Ubuntu-compatible codenames jammy/noble for Debian-family systems. Detected '{}'.",
+                    ubuntu_code
+                ));
+            }
+            let installer_url = format!(
+                "https://repo.radeon.com/amdgpu-install/6.4.4/ubuntu/{ubuntu_code}/amdgpu-install_6.4.60404-1_all.deb"
+            );
+            let deb_path = "/tmp/amdgpu-install_6.4.60404-1_all.deb";
+            emit_rocm_guided_event(app, "step", "Downloading AMD amdgpu-install package...");
+            run_command_with_retry(
+                "wget",
+                &["-O", deb_path, &installer_url],
+                None,
+                2,
+            )?;
+            let mut steps = vec![
+                "echo Refreshing apt package metadata for ROCm setup...".to_string(),
+                "apt update".to_string(),
+                "echo Installing amdgpu-install package...".to_string(),
+                format!("apt install -y {}", shell_single_quote(deb_path)),
+                "echo Running AMD ROCm guided installer...".to_string(),
+                "amdgpu-install -y --usecase=rocm --no-dkms".to_string(),
+            ];
+            if let Ok(user) = std::env::var("USER") {
+                if !user.trim().is_empty() {
+                    steps.extend(rocm_group_setup_steps(&user));
+                }
+            }
+            run_privileged_shell_streaming(app, &steps.join(" && "), None)?;
+        }
+        _ => {
+            return Err("Unsupported distro family for guided ROCm setup.".to_string());
+        }
+    }
+
+    if fake_amd_enabled() && fake_amd_allow_rocm_setup_enabled() {
+        emit_rocm_guided_event(
+            app,
+            "step",
+            "Fake AMD install-test mode is active. Skipping ROCm runtime validation because no real AMD GPU is present.",
+        );
+        return Ok(RocmGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported,
+            amd_detected: true,
+            gpu_name,
+            ready: true,
+            requires_relogin: false,
+            detail: "ROCm package installation finished. Runtime validation is skipped in fake AMD install-test mode.".to_string(),
+        });
+    }
+
+    emit_rocm_guided_event(app, "step", "Checking ROCm runtime readiness...");
+    let (ready, requires_relogin, notes) = rocm_runtime_ready();
+    let detail = if ready {
+        "ROCm runtime looks ready for use. If guided setup changed your groups, log out and back in before launching ComfyUI.".to_string()
+    } else if requires_relogin {
+        "ROCm packages installed. Log out and back in, or reboot, then run the ROCm check again."
+            .to_string()
+    } else if notes.is_empty() {
+        "ROCm guided setup finished. Log out and back in, then run the ROCm check again.".to_string()
+    } else {
+        format!(
+            "ROCm guided setup finished. Log out and back in, then run the ROCm check again. {}",
+            notes.join(" ")
+        )
+    };
+
+    Ok(RocmGuidedStatus {
+        distro_family: family,
+        distro_label,
+        supported,
+        amd_detected: true,
+        gpu_name,
+        ready,
+        requires_relogin,
+        detail,
+    })
+}
+
+#[tauri::command]
+fn get_rocm_guided_status() -> RocmGuidedStatus {
+    let os = detect_linux_os_release();
+    let family = detect_linux_distro_family();
+    let gpu_name = detect_amd_gpu_name();
+    let supported = rocm_supported_for_distro(&os, &family);
+    let distro_label = if os.pretty_name.trim().is_empty() {
+        family.clone()
+    } else {
+        os.pretty_name.clone()
+    };
+    if fake_amd_enabled() {
+        let allow_real_setup = fake_amd_allow_rocm_setup_enabled();
+        return RocmGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported: allow_real_setup,
+            amd_detected: true,
+            gpu_name,
+            ready: true,
+            requires_relogin: false,
+            detail: if allow_real_setup {
+                "Fake AMD install-test mode is active. Runtime validation is simulated because no real AMD GPU is present.".to_string()
+            } else {
+                "Fake AMD mode is active. ROCm readiness is being simulated for UI/install testing on a non-AMD system.".to_string()
+            },
+        };
+    }
+    let (ready, requires_relogin, notes) = rocm_runtime_ready();
+    let detail = if gpu_name.is_none() {
+        "AMD GPU not detected on this system.".to_string()
+    } else if !supported {
+        "Guided ROCm setup is not available for this Linux distribution family.".to_string()
+    } else if ready {
+        "ROCm runtime looks ready for use.".to_string()
+    } else if requires_relogin {
+        "ROCm install needs a logout/login or reboot, then Check ROCm again.".to_string()
+    } else {
+        let _ = notes;
+        "ROCm not ready. Run Guided ROCm Setup, then Check ROCm again.".to_string()
+    };
+    RocmGuidedStatus {
+        distro_family: family,
+        distro_label,
+        supported,
+        amd_detected: gpu_name.is_some(),
+        gpu_name,
+        ready,
+        requires_relogin,
+        detail,
+    }
+}
+
+#[tauri::command]
+async fn install_rocm_guided(app: AppHandle) -> Result<RocmGuidedStatus, String> {
+    tokio::task::spawn_blocking(move || install_rocm_guided_internal(&app))
+        .await
+        .map_err(|err| format!("ROCm guided setup task failed: {err}"))?
 }
 
 #[tauri::command]
@@ -922,6 +1391,20 @@ fn build_command(
     }
     apply_background_command_flags(&mut cmd);
     Ok(cmd)
+}
+
+fn valid_shell_env_value() -> Option<String> {
+    let shell_from_env = std::env::var("SHELL").ok();
+    let shells_file = std::fs::read_to_string("/etc/shells").ok();
+    if let (Some(shell), Some(shells)) = (shell_from_env.as_deref(), shells_file.as_deref()) {
+        if shells.lines().map(str::trim).any(|line| line == shell) {
+            return Some(shell.to_string());
+        }
+    }
+    ["/bin/bash", "/bin/sh"]
+        .into_iter()
+        .find(|path| Path::new(path).exists())
+        .map(str::to_string)
 }
 
 fn nerdstats_enabled() -> bool {
@@ -1386,6 +1869,33 @@ fn run_comfyui_preflight(
         .clone()
         .unwrap_or_else(|| get_comfyui_install_recommendation().torch_profile);
     if torch_profile_is_rocm(&selected_profile) {
+        let status = get_rocm_guided_status();
+        if status.ready {
+            push_preflight(
+                &mut items,
+                "pass",
+                "ROCm runtime",
+                status.detail,
+            );
+        } else if status.requires_relogin {
+            ok = false;
+            push_preflight(
+                &mut items,
+                "fail",
+                "ROCm runtime",
+                "ROCm install appears incomplete for the current session. Log out and back in, or reboot, then run the ROCm check again.",
+            );
+        } else {
+            ok = false;
+            push_preflight(
+                &mut items,
+                "fail",
+                "ROCm runtime",
+                status.detail,
+            );
+        }
+    }
+    if torch_profile_is_rocm(&selected_profile) {
         let incompatible: Vec<&str> = [
             (request.include_sage_attention, "SageAttention"),
             (request.include_sage_attention3, "SageAttention3"),
@@ -1608,6 +2118,23 @@ fn run_command(program: &str, args: &[&str], working_dir: Option<&Path>) -> Resu
     Ok(())
 }
 
+fn run_command_with_env(
+    program: &str,
+    args: &[&str],
+    working_dir: Option<&Path>,
+    envs: &[(&str, &str)],
+) -> Result<(), String> {
+    log::debug!("run_command_with_env: {} {}", program, args.join(" "));
+    let mut cmd = build_command(program, args, working_dir, envs)?;
+    let status = cmd
+        .status()
+        .map_err(|err| format!("Failed to run {program}: {err}"))?;
+    if !status.success() {
+        return Err(format!("Command failed: {} {}", program, args.join(" ")));
+    }
+    Ok(())
+}
+
 fn can_use_interactive_sudo() -> bool {
     std::io::stdin().is_terminal() && std::io::stderr().is_terminal()
 }
@@ -1641,6 +2168,104 @@ fn run_privileged_command(
         "Privilege escalation failed for {} {}. If running from desktop GUI, ensure a PolicyKit agent is active; otherwise run with --nerdstats from a terminal so sudo can prompt.",
         program,
         args.join(" ")
+    ))
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn rocm_group_setup_steps(user: &str) -> Vec<String> {
+    vec![
+        "echo Adding current user to render/video groups...".to_string(),
+        "getent group render >/dev/null || groupadd -f render".to_string(),
+        "getent group video >/dev/null || groupadd -f video".to_string(),
+        format!(
+            "usermod -aG render,video {} || echo Warning: could not update render/video groups automatically.",
+            shell_single_quote(user)
+        ),
+    ]
+}
+
+fn run_privileged_shell_streaming(
+    app: &AppHandle,
+    script: &str,
+    working_dir: Option<&Path>,
+) -> Result<(), String> {
+    let shell_env_value = valid_shell_env_value();
+    let shell_env: Vec<(&str, &str)> = shell_env_value
+        .as_deref()
+        .map(|shell| vec![("SHELL", shell)])
+        .unwrap_or_default();
+    let sudo_err = if can_use_interactive_sudo() {
+        emit_rocm_guided_event(
+            app,
+            "step",
+            "Requesting sudo authentication for guided ROCm setup...",
+        );
+        run_command_with_env("sudo", &["-v"], working_dir, &shell_env)?;
+        if run_command_streaming_with_env(
+            app,
+            "step",
+            "sudo",
+            &["-n", "sh", "-lc", script],
+            working_dir,
+            &shell_env,
+        )
+        .is_ok()
+        {
+            return Ok(());
+        } else {
+            "sudo credentials were not accepted for non-interactive execution.".to_string()
+        }
+    } else {
+        match run_command_streaming_with_env(
+            app,
+            "step",
+            "sudo",
+            &["-n", "sh", "-lc", script],
+            working_dir,
+            &shell_env,
+        ) {
+            Ok(()) => return Ok(()),
+            Err(err) => err,
+        }
+    };
+
+    emit_rocm_guided_event(
+        app,
+        "warn",
+        "Trying PolicyKit authentication for guided ROCm setup...",
+    );
+    let pkexec_result = run_command_streaming_with_env(
+        app,
+        "step",
+        "pkexec",
+        &["sh", "-lc", script],
+        working_dir,
+        &shell_env,
+    );
+    if pkexec_result.is_ok() {
+        return Ok(());
+    }
+
+    let pkexec_err = pkexec_result.err().unwrap_or_default();
+    let lower_pkexec = pkexec_err.to_ascii_lowercase();
+    let lower_sudo = sudo_err.to_ascii_lowercase();
+    if lower_sudo.contains("password is required")
+        && (lower_pkexec.contains("error getting authority")
+            || lower_pkexec.contains("could not connect"))
+    {
+        return Err(
+            "Guided ROCm setup could not authenticate in this environment. PolicyKit is unavailable, and sudo cannot prompt here. In distrobox or terminal testing, run `sudo -v` in the same shell first, then retry Guided ROCm Setup."
+                .to_string(),
+        );
+    }
+
+    Err(format!(
+        "Privilege escalation failed for guided ROCm setup. sudo: {} pkexec: {}",
+        sudo_err,
+        pkexec_err
     ))
 }
 
@@ -6361,9 +6986,20 @@ fn main() {
         install_linux_gdk_log_filter();
     }
 
-    let nerdstats = std::env::args().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
+    let args: Vec<String> = std::env::args().collect();
+    let nerdstats = args.iter().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
+    let fakeamd = args.iter().any(|arg| arg.eq_ignore_ascii_case("--fakeamd"));
+    let fakeamd_allow_rocm_setup = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--fakeamd-allow-rocm-setup"));
     if nerdstats {
         std::env::set_var("ARCTIC_NERDSTATS", "1");
+    }
+    if fakeamd {
+        std::env::set_var("ARCTIC_FAKE_AMD", "1");
+    }
+    if fakeamd_allow_rocm_setup {
+        std::env::set_var("ARCTIC_FAKE_AMD_ALLOW_ROCM_SETUP", "1");
     }
     if nerdstats {
         try_attach_parent_console();
@@ -6379,6 +7015,15 @@ fn main() {
 
     if nerdstats {
         log::info!("Nerdstats mode enabled (verbose runtime logging).");
+    }
+    if fakeamd {
+        if fakeamd_allow_rocm_setup {
+            log::info!(
+                "Fake AMD mode enabled with real guided ROCm setup allowed for testing."
+            );
+        } else {
+            log::info!("Fake AMD mode enabled (UI simulation only; guided ROCm setup disabled).");
+        }
     }
 
     let context = match build_context() {
@@ -6438,6 +7083,8 @@ fn main() {
             inspect_comfyui_path,
             list_comfyui_installations,
             get_comfyui_install_recommendation,
+            get_rocm_guided_status,
+            install_rocm_guided,
             get_comfyui_resume_state,
             get_comfyui_addon_state,
             apply_attention_backend_change,

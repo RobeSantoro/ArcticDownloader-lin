@@ -23,6 +23,13 @@
   "bundle": {
     "active": true,
     "publisher": "Arctic Latent",
+    "linux": {
+      "deb": {
+        "depends": [
+          "libcanberra-gtk3-module"
+        ]
+      }
+    },
     "icon": [
       "icons/icon-32.png",
       "icons/icon-64.png",

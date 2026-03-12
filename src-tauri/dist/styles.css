@@ -216,6 +216,16 @@ body {
   color: var(--muted);
   font-size: 0.84rem;
 }
+.rocm-guided-status {
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+.rocm-guided-actions {
+  grid-template-columns: 1fr 1fr;
+}
+.rocm-guided-actions button {
+  width: 100%;
+}
 .preflight-list {
   border: 1px solid var(--line);
   border-radius: 10px;
@@ -526,6 +536,7 @@ input[type="checkbox"] {
   .token-row,
   .torch-row,
   .existing-row,
+  .rocm-guided-actions,
   .resume-banner { grid-template-columns: 1fr; }
   .preflight-row { grid-template-columns: 1fr; }
   .transfer-grid { grid-template-columns: 1fr; }

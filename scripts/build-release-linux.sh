@@ -24,6 +24,7 @@ Options:
   --tag <tag>            Release tag (default: v<version>).
   --output-dir <path>    Output directory for release artifacts (default: dist).
   --notes-file <path>    Optional markdown notes file copied into output dir.
+                         Default: CHANGELOG_<version>.md in the repo root when present.
   --skip-clean           Skip cargo clean.
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
@@ -40,6 +41,27 @@ require_cmd() {
     echo "Required command not found: $cmd" >&2
     exit 1
   }
+}
+
+extract_summary_note() {
+  local file="$1"
+  local line trimmed
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    trimmed="$(printf '%s' "$line" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    [[ -z "$trimmed" ]] && continue
+    case "$trimmed" in
+      \#*) continue ;;
+      -\ *|\*\ *)
+        printf '%s\n' "${trimmed#??}"
+        return 0
+        ;;
+      *)
+        printf '%s\n' "$trimmed"
+        return 0
+        ;;
+    esac
+  done < "$file"
+  return 0
 }
 
 while (($# > 0)); do
@@ -109,6 +131,14 @@ OUT_ABS_DIR="$ROOT_DIR/$OUTPUT_DIR"
 # Ensure rustup cargo/rustc are visible even when invoked from fish or clean shells.
 export PATH="$HOME/.cargo/bin:$PATH"
 
+if [[ -z "$NOTES_FILE" ]]; then
+  default_notes_file="$ROOT_DIR/CHANGELOG_$VERSION.md"
+  if [[ -f "$default_notes_file" ]]; then
+    NOTES_FILE="$default_notes_file"
+    echo "Using changelog notes file: $NOTES_FILE"
+  fi
+fi
+
 if [[ -n "$NOTES_FILE" && ! -f "$NOTES_FILE" ]]; then
   echo "Notes file not found: $NOTES_FILE" >&2
   exit 1
@@ -162,7 +192,7 @@ prepend_debian_changelog() {
 
 summary_note="Release v$VERSION"
 if [[ -n "$NOTES_FILE" ]]; then
-  first_line="$(grep -m1 -v '^\s*$' "$NOTES_FILE" || true)"
+  first_line="$(extract_summary_note "$NOTES_FILE" || true)"
   if [[ -n "$first_line" ]]; then
     summary_note="$first_line"
   fi

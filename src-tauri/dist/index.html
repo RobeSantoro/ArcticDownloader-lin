@@ -45,6 +45,13 @@
           <select id="comfy-torch-profile"></select>
           <span id="comfy-torch-recommended">Recommended: Detecting...</span>
         </div>
+        <div class="row hidden" id="rocm-guided-row">
+          <span id="rocm-guided-status" class="rocm-guided-status">ROCm status: Not checked.</span>
+        </div>
+        <div class="row rocm-guided-actions hidden" id="rocm-guided-actions">
+          <button id="rocm-guided-check">Check ROCm</button>
+          <button id="rocm-guided-install">Guided ROCm Setup</button>
+        </div>
         <div class="row torch-row">
           <select id="comfy-mode">
             <option value="install">Install New</option>

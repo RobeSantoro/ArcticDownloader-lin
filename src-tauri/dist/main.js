@@ -39,6 +39,8 @@ const state = {
   comfyAddonLoadSeq: 0,
   comfyDetectedGpuVendor: "",
   comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected.",
+  rocmGuidedBusy: false,
+  rocmGuidedStatus: null,
   sharedModelsRootDefault: "",
   sharedModelsUseDefault: false,
 };
@@ -91,6 +93,11 @@ const el = {
 
   comfyTorchProfile: document.getElementById("comfy-torch-profile"),
   comfyTorchRecommended: document.getElementById("comfy-torch-recommended"),
+  rocmGuidedRow: document.getElementById("rocm-guided-row"),
+  rocmGuidedActions: document.getElementById("rocm-guided-actions"),
+  rocmGuidedStatus: document.getElementById("rocm-guided-status"),
+  rocmGuidedCheck: document.getElementById("rocm-guided-check"),
+  rocmGuidedInstall: document.getElementById("rocm-guided-install"),
   comfyMode: document.getElementById("comfy-mode"),
   comfyModeHelp: document.getElementById("comfy-mode-help"),
   comfyExistingInstall: document.getElementById("comfy-existing-install"),
@@ -427,6 +434,62 @@ function setTorchRecommendedDetecting(detecting) {
     el.comfyTorchRecommended.textContent = "Detecting torch/add-ons for selected install...";
   } else {
     el.comfyTorchRecommended.textContent = state.comfyTorchRecommendedBase;
+  }
+}
+
+function updateRocmGuidedUi() {
+  const profile = String(el.comfyTorchProfile?.value || "").trim();
+  const show = state.comfyDetectedGpuVendor === "amd" || profile === "torch291_rocm64";
+  if (el.rocmGuidedRow) {
+    el.rocmGuidedRow.classList.toggle("hidden", !show);
+  }
+  if (el.rocmGuidedActions) {
+    el.rocmGuidedActions.classList.toggle("hidden", !show);
+  }
+  if (!show) {
+    return;
+  }
+  const status = state.rocmGuidedStatus;
+  if (el.rocmGuidedStatus) {
+    el.rocmGuidedStatus.textContent = status?.detail
+      ? `ROCm status: ${status.detail}`
+      : "ROCm status: Not checked.";
+  }
+  if (el.rocmGuidedCheck) {
+    el.rocmGuidedCheck.disabled = state.rocmGuidedBusy;
+    el.rocmGuidedCheck.textContent = state.rocmGuidedBusy ? "Checking..." : "Check ROCm";
+  }
+  if (el.rocmGuidedInstall) {
+    const installBlocked = state.rocmGuidedBusy || status?.supported === false || status?.amd_detected === false;
+    el.rocmGuidedInstall.disabled = installBlocked;
+    el.rocmGuidedInstall.textContent = state.rocmGuidedBusy ? "Running Setup..." : "Guided ROCm Setup";
+  }
+}
+
+async function refreshRocmGuidedStatus(logResult = false) {
+  if (!invoke) return null;
+  state.rocmGuidedBusy = true;
+  updateRocmGuidedUi();
+  try {
+    const status = await invoke("get_rocm_guided_status");
+    state.rocmGuidedStatus = status || null;
+    if (logResult && status?.detail) {
+      logComfyLine(`ROCm check: ${status.detail}`);
+    }
+    return status;
+  } catch (err) {
+    state.rocmGuidedStatus = {
+      detail: `Failed to check ROCm status: ${err}`,
+      supported: false,
+      amd_detected: state.comfyDetectedGpuVendor === "amd",
+    };
+    if (logResult) {
+      logComfyLine(String(state.rocmGuidedStatus.detail));
+    }
+    return null;
+  } finally {
+    state.rocmGuidedBusy = false;
+    updateRocmGuidedUi();
   }
 }
 
@@ -1743,6 +1806,7 @@ function applyComfyTorchProfileOptions(selectedValue = null) {
       : "torch280_cu128";
     el.comfyTorchProfile.value = fallback;
   }
+  updateRocmGuidedUi();
 }
 
 function switchTab(tab) {
@@ -1954,6 +2018,10 @@ async function bootstrap() {
         state.titleSystemText = `${ramText}${DOT_SEP}${gpuText}`;
         applyComfyTorchProfileOptions(el.comfyTorchProfile?.value || null);
         applyComfyAddonRules();
+        updateRocmGuidedUi();
+        if ((amdGpu || String(el.comfyTorchProfile?.value || "").trim() === "torch291_rocm64") && !state.rocmGuidedStatus) {
+          refreshRocmGuidedStatus(false).catch(() => {});
+        }
         renderAppVersionTag();
         renderTitleMeta();
         if (!amdGpu && !nvidiaGpu && attempt < 8) {
@@ -2017,6 +2085,7 @@ async function bootstrap() {
     el.comfyTorchProfile.value = savedTorchProfile;
     state.comfyTorchProfileLocked = true;
   }
+  updateRocmGuidedUi();
 
   const refreshRecommendation = (attempt = 0) => {
     invoke("get_comfyui_install_recommendation")
@@ -2348,10 +2417,37 @@ el.comfyExtraModelRoot?.addEventListener("change", async () => {
   }
 });
 
+el.comfyTorchProfile?.addEventListener("change", async () => {
+  if (state.comfyDetectedGpuVendor !== "amd") {
+    state.comfyTorchProfileLocked = true;
+  }
+  applyComfyAddonRules();
+  updateRocmGuidedUi();
+  if (String(el.comfyTorchProfile.value || "").trim() === "torch291_rocm64") {
+    await refreshRocmGuidedStatus(false);
+  }
+});
+
 el.comfyMode?.addEventListener("change", async () => {
   state.comfyMode = el.comfyMode.value === "manage" ? "manage" : "install";
   if (state.comfyMode !== "manage") {
     resetComfySelectionsToDefaults();
+    const savedTorchProfile = String(state.settings?.comfyui_torch_profile || "").trim();
+    if (state.comfyDetectedGpuVendor === "amd") {
+      state.comfyTorchProfileLocked = false;
+      applyComfyTorchProfileOptions("torch291_rocm64");
+      el.comfyTorchProfile.value = "torch291_rocm64";
+    } else {
+      applyComfyTorchProfileOptions(savedTorchProfile || "torch280_cu128");
+      if (savedTorchProfile && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)) {
+        el.comfyTorchProfile.value = savedTorchProfile;
+        state.comfyTorchProfileLocked = true;
+      } else {
+        state.comfyTorchProfileLocked = false;
+      }
+    }
+    applyComfyAddonRules();
+    updateRocmGuidedUi();
     if (el.comfyExtraModelRoot) {
       el.comfyExtraModelRoot.value = state.sharedModelsRootDefault || "";
     }
@@ -2500,6 +2596,33 @@ el.addonPinnedMemory?.addEventListener("change", () => {
 el.launchListen?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.launchListen, "launch_listen", "--listen")
     .catch((err) => logComfyLine(String(err)));
+});
+el.rocmGuidedCheck?.addEventListener("click", async () => {
+  await refreshRocmGuidedStatus(true);
+});
+el.rocmGuidedInstall?.addEventListener("click", async () => {
+  state.rocmGuidedBusy = true;
+  updateRocmGuidedUi();
+  logComfyLine("Starting guided ROCm setup...");
+  await new Promise((resolve) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(resolve);
+    });
+  });
+  try {
+    const status = await invoke("install_rocm_guided");
+    state.rocmGuidedStatus = status || null;
+    if (status?.detail) {
+      logComfyLine(`ROCm guided setup: ${status.detail}`);
+    }
+    await refreshRocmGuidedStatus(false);
+  } catch (err) {
+    logComfyLine(`ROCm guided setup failed: ${err}`);
+    await refreshRocmGuidedStatus(false);
+  } finally {
+    state.rocmGuidedBusy = false;
+    updateRocmGuidedUi();
+  }
 });
 el.nodeComfyuiManager?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.nodeComfyuiManager, "node_comfyui_manager", "comfyui-manager")

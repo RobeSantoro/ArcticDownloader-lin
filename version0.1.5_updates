@@ -110,9 +110,194 @@ Entries:
     - If an NVIDIA GPU is detected, the ROCm torch profile is now disabled in the installer dropdown.
     - If the UI somehow lands on the ROCm profile while NVIDIA is detected, it falls back to a CUDA profile automatically.
 - 2026-03-12
+  - Added guided ROCm setup support for AMD users on supported Linux distro families.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - Added a ROCm status row in the ComfyUI installer UI with `Check ROCm` and `Guided ROCm Setup` actions.
+    - Added backend ROCm readiness checks covering `rocminfo`, `/dev/kfd`, and current user group membership (`render`/`video`).
+    - Added guided ROCm setup flows for supported distro families:
+      - Debian-based systems: installs AMD's `amdgpu-install` package and runs the ROCm usecase installer.
+      - Fedora: installs ROCm packages with `dnf`.
+      - Arch: installs ROCm packages with `pacman`.
+    - Added ROCm preflight validation so the ComfyUI installer blocks ROCm installs until the system runtime looks ready.
+    - Guided setup may still require logout/login or reboot before ROCm becomes usable.
+- 2026-03-12
+  - Added safe AMD simulation mode and more detailed ROCm setup logging.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+    - CHANGELOG_0.1.5.md
+  - Notes:
+    - Added `--fakeamd` launch flag for UI testing on non-AMD systems.
+    - Fake AMD mode enables the AMD/ROCm UI path but disables the real guided ROCm installer to avoid modifying NVIDIA/non-AMD machines.
+    - Guided ROCm setup now emits step-by-step progress messages into the existing ComfyUI log stream.
+- 2026-03-12
   - Added a human-readable 0.1.5 changelog file for release notes and cross-platform handoff.
   - Files changed:
     - CHANGELOG_0.1.5.md
     - version0.1.5_updates
   - Notes:
     - Summarizes the implemented fixes and enhancements in user-facing language.
+- 2026-03-12
+  - Updated the Linux release build script to automatically use the root changelog file as release notes.
+  - Files changed:
+    - scripts/build-release-linux.sh
+    - version0.1.5_updates
+  - Notes:
+    - If `CHANGELOG_<version>.md` exists in the repo root, the script now uses it automatically as the notes file.
+    - `--notes-file` still works and overrides the default behavior.
+    - The script now extracts a cleaner summary line from the markdown file for Debian changelog generation instead of using the markdown title line verbatim.
+- 2026-03-12
+  - Fixed the ComfyUI installer torch profile reset when switching from `Manage Existing` back to `Install New`.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - If AMD is detected, switching back to `Install New` now restores the ROCm torch profile in the dropdown instead of leaving the previously managed install profile selected.
+    - This keeps the dropdown aligned with the AMD auto-selection message and ROCm-only profile restrictions.
+- 2026-03-12
+  - Adjusted fake AMD mode so ROCm preflight does not block installer flow during UI/testing sessions.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - In `--fakeamd` mode, ROCm readiness is now simulated as ready for preflight purposes.
+    - Guided ROCm setup remains disabled in fake AMD mode to avoid modifying a non-AMD system.
+    - This allows testing the AMD/ROCm install flow on NVIDIA or non-AMD machines without hitting a blocking ROCm runtime failure.
+- 2026-03-12
+  - Added an explicit override so fake AMD mode can run the real guided ROCm package install when requested.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Added `--fakeamd-allow-rocm-setup` for testing the real guided ROCm package installation flow on non-AMD systems.
+    - Default `--fakeamd` behavior stays safe and keeps guided ROCm setup disabled.
+    - When the override flag is present, the app no longer fakes ROCm readiness and instead runs the normal guided setup/preflight behavior.
+- 2026-03-12
+  - Corrected ROCm preflight messaging so fresh AMD users are not told to log out or reboot before ROCm is actually installed.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - The ROCm preflight now only marks the situation as a relogin/reboot case when ROCm runtime components appear to be partially present but the current user session has not picked up the required `render`/`video` group membership yet.
+    - A fully missing ROCm install now stays in the normal “runtime is not ready” path instead of the misleading “log out and back in” path.
+- 2026-03-12
+  - Made ROCm failure messaging explicit and actionable for fresh AMD installs.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - When ROCm is missing or incomplete, the status/preflight message now explicitly says so and tells the user to run `Guided ROCm Setup`, then run the ROCm check again.
+    - The relogin/reboot wording is now reserved for post-install session refresh cases only.
+- 2026-03-12
+  - Shortened ROCm status text so the installer UI row stays readable.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - The ROCm status row now uses a concise summary instead of appending all low-level readiness notes into one long sentence.
+    - Missing/incomplete ROCm now shows a short “Run Guided ROCm Setup, then Check ROCm again” message.
+- 2026-03-12
+  - Streamed guided ROCm installation command output into the GUI log and made auth/group-update failures visible.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Guided ROCm setup now forwards live `pacman`/`dnf`/`apt`/`pkexec`/`sudo` command output into the existing ComfyUI install log panel.
+    - The app now logs when passwordless sudo is unavailable, when it falls back to PolicyKit, and when terminal sudo authentication is required.
+    - The render/video group update step now logs warnings if it fails instead of failing silently.
+- 2026-03-12
+  - Reduced repeated sudo prompts during guided ROCm setup.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Guided ROCm setup now runs each distro workflow as a single privileged shell session instead of several separate root commands.
+    - This reduces repeated sudo prompts and keeps the package-manager output in one continuous GUI log stream.
+- 2026-03-12
+  - Removed an unused guided ROCm helper after consolidating the workflow into a single privileged shell path.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Cleans up the Rust warning about the unused `run_privileged_command_streaming` function during `cargo tauri dev`.
+- 2026-03-12
+  - Fixed ROCm readiness detection on Arch and clarified fake AMD install-test completion status.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - The app now detects `rocminfo` from `/opt/rocm/bin/rocminfo` when it is installed there but not present in the default shell `PATH`.
+    - In `--fakeamd --fakeamd-allow-rocm-setup` mode, a successful package install no longer ends with a misleading runtime-failure message tied to missing real AMD hardware.
+    - Fake AMD install-test mode now reports that runtime validation is intentionally skipped because no real AMD GPU is present.
+- 2026-03-12
+  - Moved guided ROCm setup off the UI thread to prevent the app from appearing frozen during long distro-specific install steps.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - `install_rocm_guided` is now executed through `tokio::task::spawn_blocking`.
+    - This keeps the window responsive while package-manager and privileged setup commands are running.
+- 2026-03-12
+  - Improved guided ROCm setup responsiveness in the UI so users see immediate feedback after clicking the action.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - The UI now logs `Starting guided ROCm setup...` immediately and yields a paint frame before invoking the backend command.
+    - This reduces the dead-window feel during the first seconds of Fedora/Ubuntu guided setup.
+- 2026-03-12
+  - Added `libcanberra-gtk3-module` as a Debian package dependency for the Linux bundle.
+  - Files changed:
+    - src-tauri/tauri.conf.json
+    - version0.1.5_updates
+  - Notes:
+    - Helps Ubuntu/Debian users avoid the common GTK warning about the missing `canberra-gtk-module` after installing the generated `.deb`.
+- 2026-03-12
+  - Fixed guided ROCm group setup on distros where the `render` group does not already exist.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Guided ROCm setup now creates missing `render` and `video` groups before adding the current user with `usermod`.
+    - Prevents the misleading `usermod: group 'render' does not exist` warning seen in some Ubuntu/Debian environments.
+- 2026-03-12
+  - Fixed Fedora distrobox guided ROCm auth failures caused by an invalid `SHELL` environment value for `sudo`.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - The privileged ROCm setup path now forces a valid shell from `/etc/shells` (falling back to `/bin/bash` or `/bin/sh`) when invoking `sudo`/`pkexec`.
+    - Prevents errors like `The value for the SHELL variable was not found in the /etc/shells file` in Fedora distrobox testing.
+- 2026-03-12
+  - Removed the older unused command-streaming helper after switching guided ROCm setup to the env-aware variant.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Cleans up the Rust warning about the unused `run_command_streaming` function.
+- 2026-03-12
+  - Improved guided ROCm auth failure messaging for distrobox/terminal environments without PolicyKit.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - When `sudo` requires a password but cannot prompt interactively and `pkexec` cannot connect to an authority, the app now returns a specific message telling the user to run `sudo -v` in the same shell first, then retry.
+- 2026-03-12
+  - Cleaned up the guided ROCm auth helper to remove an unused-assignment Rust warning.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Reworked the `sudo_err` assignment flow so it is initialized directly from the branch result instead of being assigned `None` first and overwritten later.
+- 2026-03-12
+  - Updated guided ROCm completion messaging to explicitly recommend logging out and back in after setup.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - The post-setup status now reminds users to log out and back in, then rerun the ROCm check, so new `render`/`video` group membership is more likely to be applied before launching ComfyUI.
