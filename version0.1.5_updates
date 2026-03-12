@@ -330,3 +330,19 @@ Entries:
     - version0.1.5_updates
   - Notes:
     - Reduced the changelog to the main user-facing highlights, Linux AMD/ROCm support summary, installer improvements, and a short note section.
+- 2026-03-12
+  - Added optional GitHub release publishing to the Linux build script.
+  - Files changed:
+    - scripts/build-release-linux.sh
+    - version0.1.5_updates
+  - Notes:
+    - Added `--publish-github` to create or update the GitHub release with the built Linux artifacts.
+    - If the release already exists, the script now uploads/clobbers assets and refreshes the notes when a changelog file is provided.
+- 2026-03-12
+  - Added AUR publishing support and a full non-interactive publish path to the Linux build script.
+  - Files changed:
+    - scripts/build-release-linux.sh
+    - version0.1.5_updates
+  - Notes:
+    - Added `--publish-aur` and `--publish-all`.
+    - The build script can now update `packaging/aur-bin`, sync it into the local AUR git checkout, commit, and push it as part of the same release command.

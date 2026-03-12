@@ -7,8 +7,13 @@ TAG=""
 OUTPUT_DIR="dist"
 NOTES_FILE=""
 SKIP_CLEAN=0
+PUBLISH_GITHUB=0
+PUBLISH_AUR=0
 DEB_DISTROBOX="arctic-ubuntu"
 RPM_DISTROBOX="arctic-fedora"
+AUR_PACKAGE="arctic-comfyui-helper-bin"
+AUR_PKGREL="1"
+AUR_REPO_DIR="${HOME}/aur/arctic-comfyui-helper-bin"
 DEB_SUDO_PASSWORD="${ARCTIC_DEB_SUDO_PASSWORD:-}"
 RPM_SUDO_PASSWORD="${ARCTIC_RPM_SUDO_PASSWORD:-}"
 
@@ -26,8 +31,14 @@ Options:
   --notes-file <path>    Optional markdown notes file copied into output dir.
                          Default: CHANGELOG_<version>.md in the repo root when present.
   --skip-clean           Skip cargo clean.
+  --publish-github       Create/update the GitHub release and upload built assets.
+  --publish-aur          Update and push the AUR binary package metadata.
+  --publish-all          Publish both GitHub release assets and the AUR package.
   --deb-distrobox <name> Distrobox name for Debian package build (default: arctic-ubuntu).
   --rpm-distrobox <name> Distrobox name for RPM package build (default: arctic-fedora).
+  --aur-package <name>   AUR package name to update (default: arctic-comfyui-helper-bin).
+  --aur-pkgrel <n>       AUR pkgrel value (default: 1).
+  --aur-repo-dir <path>  Local AUR git repo checkout (default: ~/aur/arctic-comfyui-helper-bin).
   Environment variables for non-interactive sudo:
     ARCTIC_DEB_SUDO_PASSWORD
     ARCTIC_RPM_SUDO_PASSWORD
@@ -90,12 +101,37 @@ while (($# > 0)); do
       SKIP_CLEAN=1
       shift
       ;;
+    --publish-github)
+      PUBLISH_GITHUB=1
+      shift
+      ;;
+    --publish-aur)
+      PUBLISH_AUR=1
+      shift
+      ;;
+    --publish-all)
+      PUBLISH_GITHUB=1
+      PUBLISH_AUR=1
+      shift
+      ;;
     --deb-distrobox)
       DEB_DISTROBOX="${2:-}"
       shift 2
       ;;
     --rpm-distrobox)
       RPM_DISTROBOX="${2:-}"
+      shift 2
+      ;;
+    --aur-package)
+      AUR_PACKAGE="${2:-}"
+      shift 2
+      ;;
+    --aur-pkgrel)
+      AUR_PKGREL="${2:-}"
+      shift 2
+      ;;
+    --aur-repo-dir)
+      AUR_REPO_DIR="${2:-}"
       shift 2
       ;;
     -h|--help)
@@ -120,6 +156,10 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   echo "Version must be semantic version x.y.z" >&2
   exit 1
 fi
+if [[ ! "$AUR_PKGREL" =~ ^[0-9]+$ ]]; then
+  echo "AUR pkgrel must be a positive integer" >&2
+  exit 1
+fi
 
 if [[ -z "$TAG" ]]; then
   TAG="v$VERSION"
@@ -128,6 +168,7 @@ fi
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PACKAGING_DIR="$ROOT_DIR/packaging"
 OUT_ABS_DIR="$ROOT_DIR/$OUTPUT_DIR"
+AUR_REPO_DIR="${AUR_REPO_DIR/#\~/$HOME}"
 # Ensure rustup cargo/rustc are visible even when invoked from fish or clean shells.
 export PATH="$HOME/.cargo/bin:$PATH"
 
@@ -148,6 +189,12 @@ require_cmd cargo
 require_cmd sha256sum
 require_cmd bash
 require_cmd distrobox
+if ((PUBLISH_GITHUB == 1)); then
+  require_cmd gh
+fi
+if ((PUBLISH_AUR == 1)); then
+  require_cmd git
+fi
 
 update_simple_version() {
   local file="$1"
@@ -395,3 +442,49 @@ echo "Build release artifacts complete:"
 echo "  Output: $OUT_ABS_DIR"
 echo "  Manifest: $manifest"
 echo "  Checksums: $OUT_ABS_DIR/SHA256SUMS"
+
+if ((PUBLISH_GITHUB == 1)); then
+  echo "Publishing GitHub release '$TAG' to '$REPOSITORY' ..."
+  mapfile -t release_files < <(find "$OUT_ABS_DIR" -maxdepth 1 -type f \( -name '*.pkg.tar.*' -o -name '*.deb' -o -name '*.rpm' -o -name '*.src.rpm' -o -name 'SHA256SUMS' \) | sort)
+  if gh release view "$TAG" --repo "$REPOSITORY" >/dev/null 2>&1; then
+    gh release upload "$TAG" "${release_files[@]}" --repo "$REPOSITORY" --clobber
+    if [[ -n "$NOTES_FILE" ]]; then
+      gh release edit "$TAG" --repo "$REPOSITORY" --notes-file "$NOTES_FILE"
+    fi
+  else
+    release_title="Arctic ComfyUI Helper $VERSION"
+    if [[ -n "$NOTES_FILE" ]]; then
+      gh release create "$TAG" "${release_files[@]}" --repo "$REPOSITORY" --title "$release_title" --notes-file "$NOTES_FILE"
+    else
+      gh release create "$TAG" "${release_files[@]}" --repo "$REPOSITORY" --title "$release_title" --notes "$summary_note"
+    fi
+  fi
+  echo "GitHub release publish complete:"
+  echo "  https://github.com/$REPOSITORY/releases/tag/$TAG"
+fi
+
+if ((PUBLISH_AUR == 1)); then
+  echo "Updating AUR package metadata for '$AUR_PACKAGE' ..."
+  (cd "$ROOT_DIR" && bash scripts/update-aur-bin.sh --version "$VERSION" --pkgrel "$AUR_PKGREL" --output-dir "$OUTPUT_DIR" --repository "$REPOSITORY")
+
+  if [[ ! -d "$AUR_REPO_DIR/.git" ]]; then
+    echo "Cloning AUR repo into $AUR_REPO_DIR ..."
+    mkdir -p "$(dirname "$AUR_REPO_DIR")"
+    git clone "ssh://aur@aur.archlinux.org/${AUR_PACKAGE}.git" "$AUR_REPO_DIR"
+  fi
+
+  cp "$ROOT_DIR/packaging/aur-bin/PKGBUILD" "$AUR_REPO_DIR/PKGBUILD"
+  cp "$ROOT_DIR/packaging/aur-bin/.SRCINFO" "$AUR_REPO_DIR/.SRCINFO"
+
+  (
+    cd "$AUR_REPO_DIR"
+    if [[ -n "$(git status --porcelain)" ]]; then
+      git add PKGBUILD .SRCINFO
+      git commit -m "Update to ${VERSION}-${AUR_PKGREL}"
+      git push origin master
+      echo "AUR package pushed: $AUR_PACKAGE"
+    else
+      echo "AUR package already up to date: $AUR_PACKAGE"
+    fi
+  )
+fi

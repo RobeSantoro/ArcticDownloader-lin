@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.1.5-1) unstable; urgency=medium
+
+  * Added a new `Flags` section for ComfyUI launch options.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Thu, 12 Mar 2026 16:33:19 -0400
+
 arctic-comfyui-helper (0.1.4-1) unstable; urgency=medium
 
   * Fixed extra model (shared folder) issue
