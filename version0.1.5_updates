@@ -316,3 +316,17 @@ Entries:
   - Notes:
     - `Check ROCm` and `Guided ROCm Setup` are now shown only while ROCm still needs setup or confirmation.
     - On ready systems, the ROCm setup section no longer stays visible for AMD/ROCm users.
+- 2026-03-12
+  - Brought the human-readable 0.1.5 changelog up to date with the later ROCm installer/auth/UI fixes.
+  - Files changed:
+    - CHANGELOG_0.1.5.md
+    - version0.1.5_updates
+  - Notes:
+    - Added the missing guided ROCm refinements, fake AMD test-mode details, logout/login guidance, improved logging/auth behavior, and ROCm setup UI polish to the release-note style changelog.
+- 2026-03-12
+  - Rewrote the 0.1.5 changelog into a shorter GitHub-release style summary.
+  - Files changed:
+    - CHANGELOG_0.1.5.md
+    - version0.1.5_updates
+  - Notes:
+    - Reduced the changelog to the main user-facing highlights, Linux AMD/ROCm support summary, installer improvements, and a short note section.
