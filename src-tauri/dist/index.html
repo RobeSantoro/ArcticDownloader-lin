@@ -105,6 +105,15 @@
           <label><input type="checkbox" id="node-comfyui-crystools" /> comfyui-crystools</label>
         </div>
 
+        <div class="row section-header">
+          <h3>Flags</h3>
+        </div>
+        <div class="row option-grid">
+          <label title="Launch ComfyUI with SageAttention enabled when SageAttention is installed. Turn this off if you want to keep SageAttention installed but start ComfyUI without it."><input type="checkbox" id="flag-sageattention" /> --use-sage-attention</label>
+          <label title="Launch ComfyUI with FlashAttention enabled when FlashAttention is installed. Turn this off if you want to keep FlashAttention installed but start ComfyUI without it."><input type="checkbox" id="flag-flashattention" /> --use-flash-attention</label>
+          <label title="Start ComfyUI with the --listen flag so the server binds beyond localhost and can be reached from other devices on your network. Enable this only on networks you trust."><input type="checkbox" id="launch-listen" /> --listen</label>
+        </div>
+
         <div class="row install-action-row">
           <button id="install-comfyui" class="primary">Install ComfyUI</button>
           <span id="comfy-install-spinner" class="install-spinner hidden" aria-hidden="true"></span>

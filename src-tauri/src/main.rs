@@ -43,6 +43,7 @@ struct AppSnapshot {
     ram_tier: Option<String>,
     nvidia_gpu_name: Option<String>,
     nvidia_gpu_vram_mb: Option<u64>,
+    amd_gpu_name: Option<String>,
     model_count: usize,
     lora_count: usize,
 }
@@ -199,6 +200,7 @@ fn default_true() -> bool {
 fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
     let catalog = state.context.catalog.catalog_snapshot();
     let (nvidia_gpu_name, nvidia_gpu_vram_mb) = detect_nvidia_gpu();
+    let amd_gpu_name = detect_amd_gpu_name();
     let ram_profile = state.context.ram_profile.or_else(detect_ram_profile);
     AppSnapshot {
         version: state.context.display_version.clone(),
@@ -206,6 +208,7 @@ fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
         ram_tier: ram_profile.map(|profile| profile.tier.label().to_string()),
         nvidia_gpu_name,
         nvidia_gpu_vram_mb,
+        amd_gpu_name,
         model_count: catalog.models.len(),
         lora_count: catalog.loras.len(),
     }
@@ -224,8 +227,15 @@ struct NvidiaGpuDetails {
     compute_capability: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct AmdGpuDetails {
+    name: Option<String>,
+}
+
 static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::new();
 static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
+static AMD_GPU_DETAILS_CACHE: OnceLock<Mutex<Option<AmdGpuDetails>>> = OnceLock::new();
+static AMD_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
 static LINUX_PREREQ_CACHE: OnceLock<Mutex<Option<LinuxPrereqScan>>> = OnceLock::new();
 
@@ -240,6 +250,10 @@ fn tray_menu_items() -> &'static Mutex<Option<TrayMenuItems>> {
 
 fn gpu_details_cache() -> &'static Mutex<Option<NvidiaGpuDetails>> {
     GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn amd_gpu_details_cache() -> &'static Mutex<Option<AmdGpuDetails>> {
+    AMD_GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn linux_prereq_cache() -> &'static Mutex<Option<LinuxPrereqScan>> {
@@ -448,6 +462,45 @@ fn query_nvidia_gpu_details_blocking() -> NvidiaGpuDetails {
     }
 }
 
+fn query_amd_gpu_details_blocking() -> AmdGpuDetails {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return AmdGpuDetails::default();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let (stdout, _) = match run_command_capture("lspci", &["-nn"], None) {
+            Ok(out) => out,
+            Err(_) => return AmdGpuDetails::default(),
+        };
+        let line = stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| {
+                let lower = line.to_ascii_lowercase();
+                (lower.contains("vga compatible controller")
+                    || lower.contains("3d controller")
+                    || lower.contains("display controller"))
+                    && (lower.contains("advanced micro devices")
+                        || lower.contains("amd/ati")
+                        || lower.contains("radeon")
+                        || lower.contains("amdgpu"))
+            })
+            .unwrap_or_default();
+        if line.is_empty() {
+            return AmdGpuDetails::default();
+        }
+        let name = line
+            .split(": ")
+            .nth(1)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        AmdGpuDetails { name }
+    }
+}
+
 fn is_nvidia_hopper_sm90() -> bool {
     let gpu = detect_nvidia_gpu_details();
     if gpu
@@ -496,10 +549,48 @@ fn detect_nvidia_gpu_details() -> NvidiaGpuDetails {
     NvidiaGpuDetails::default()
 }
 
+fn detect_amd_gpu_details() -> AmdGpuDetails {
+    if let Ok(guard) = amd_gpu_details_cache().lock() {
+        if let Some(details) = guard.clone() {
+            return details;
+        }
+    }
+
+    if !AMD_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(|| {
+            let details = query_amd_gpu_details_blocking();
+            let has_data = details.name.is_some();
+            if let Ok(mut guard) = amd_gpu_details_cache().lock() {
+                if has_data {
+                    *guard = Some(details);
+                } else {
+                    *guard = None;
+                    AMD_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+
+    AmdGpuDetails::default()
+}
+
+fn detect_amd_gpu_name() -> Option<String> {
+    detect_amd_gpu_details().name
+}
+
 #[tauri::command]
 fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
     let gpu = detect_nvidia_gpu_details();
     let gpu_name = gpu.name.clone().unwrap_or_default().to_ascii_lowercase();
+    if let Some(amd_name) = detect_amd_gpu_name() {
+        return ComfyInstallRecommendation {
+            gpu_name: Some(amd_name),
+            driver_version: None,
+            torch_profile: "torch291_rocm64".to_string(),
+            torch_label: "Torch 2.9.1 + ROCm 6.4".to_string(),
+            reason: "Detected AMD GPU; selecting ROCm install profile.".to_string(),
+        };
+    }
     let driver_major = gpu
         .driver_version
         .as_deref()
@@ -1290,12 +1381,43 @@ fn run_comfyui_preflight(
         }
     }
 
+    let selected_profile = request
+        .torch_profile
+        .clone()
+        .unwrap_or_else(|| get_comfyui_install_recommendation().torch_profile);
+    if torch_profile_is_rocm(&selected_profile) {
+        let incompatible: Vec<&str> = [
+            (request.include_sage_attention, "SageAttention"),
+            (request.include_sage_attention3, "SageAttention3"),
+            (request.include_flash_attention, "FlashAttention"),
+            (request.include_nunchaku, "Nunchaku"),
+            (request.include_trellis2, "Trellis2"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, name)| enabled.then_some(name))
+        .collect();
+        if incompatible.is_empty() {
+            push_preflight(
+                &mut items,
+                "pass",
+                "ROCm add-on compatibility",
+                "Selected add-ons are compatible with the ROCm install profile.",
+            );
+        } else {
+            ok = false;
+            push_preflight(
+                &mut items,
+                "fail",
+                "ROCm add-on compatibility",
+                format!(
+                    "These options are currently CUDA-only in this app and must be disabled for ROCm installs: {}.",
+                    incompatible.join(", ")
+                ),
+            );
+        }
+    }
+
     if request.include_trellis2 {
-        let recommendation = get_comfyui_install_recommendation();
-        let selected_profile = request
-            .torch_profile
-            .clone()
-            .unwrap_or(recommendation.torch_profile);
         let trellis_supported = matches!(selected_profile.as_str(), "torch280_cu128");
         if trellis_supported {
             push_preflight(
@@ -1939,7 +2061,7 @@ fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     cmd.arg("-c").arg(
         "import torch; \
          v = getattr(torch, '__version__', ''); \
-         c = getattr(torch.version, 'cuda', '') or ''; \
+         c = getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ''; \
          print(v); print(c)",
     );
     cmd.current_dir(root);
@@ -1959,7 +2081,7 @@ fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     }
 
     Err(format!(
-        "Unsupported installed torch/cuda combo: torch={torch_v}, cuda={cuda_v}"
+        "Unsupported installed torch runtime combo: torch={torch_v}, runtime={cuda_v}"
     ))
 }
 
@@ -2038,6 +2160,7 @@ fn torch_profile_to_packages_linux(
 ) -> (&'static str, &'static str, &'static str, &'static str) {
     match profile {
         "torch271_cu128" => ("2.7.1", "0.22.1", "2.7.1", "https://download.pytorch.org/whl/cu128"),
+        "torch291_rocm64" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/rocm6.4"),
         "torch291_cu130" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/cu130"),
         _ => ("2.8.0", "0.23.0", "2.8.0", "https://download.pytorch.org/whl/cu128"),
     }
@@ -2052,6 +2175,9 @@ fn torch_profile_from_versions(torch_v: &str, cuda_v: &str) -> Option<String> {
     if t.starts_with("2.8") && c.starts_with("12.8") {
         return Some("torch280_cu128".to_string());
     }
+    if t.starts_with("2.9") && c.starts_with("6.4") {
+        return Some("torch291_rocm64".to_string());
+    }
     if t.starts_with("2.9") && c.starts_with("13.0") {
         return Some("torch291_cu130".to_string());
     }
@@ -2064,6 +2190,10 @@ fn triton_package_for_profile_linux(profile: &str) -> &'static str {
         "torch291_cu130" => "triton<3.6",
         _ => "triton==3.4.0",
     }
+}
+
+fn torch_profile_is_rocm(profile: &str) -> bool {
+    profile.contains("_rocm")
 }
 
 fn enforce_torch_profile_linux(
@@ -2090,28 +2220,31 @@ fn enforce_torch_profile_linux(
         Some(root),
         &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
-    run_uv_pip_strict(
-        uv_bin,
-        py_path,
-        &[
-            "install",
-            "--upgrade",
-            "--reinstall",
-            triton_package_for_profile_linux(profile),
-        ],
-        Some(root),
-        &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
-    )?;
+    if !torch_profile_is_rocm(profile) {
+        run_uv_pip_strict(
+            uv_bin,
+            py_path,
+            &[
+                "install",
+                "--upgrade",
+                "--reinstall",
+                triton_package_for_profile_linux(profile),
+            ],
+            Some(root),
+            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+        )?;
+    }
     let mut verify_cmd = std::process::Command::new(py_path);
     verify_cmd.arg("-c").arg(
         "import torch, importlib.metadata as m; \
          print(getattr(torch, '__version__', '')); \
-         print(getattr(torch.version, 'cuda', '') or ''); \
+         print(getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ''); \
          print(m.version('torchvision')); \
          print(m.version('torchaudio'))",
     );
     verify_cmd.current_dir(root);
     apply_background_command_flags(&mut verify_cmd);
+    apply_torch_allocator_env_compat(&mut verify_cmd);
     let verify = verify_cmd
         .output()
         .map_err(|err| format!("Failed to verify torch profile with {py_path}: {err}"))?;
@@ -2138,7 +2271,7 @@ fn infer_torch_profile_from_installed_packages(root: &Path) -> Option<String> {
     cmd.arg("-c").arg(
         "import importlib.metadata as m, torch; \
          ta = m.version('torchaudio') if m else ''; \
-         c = getattr(torch.version, 'cuda', '') or ''; \
+         c = getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ''; \
          print(ta); print(c)",
     );
     cmd.current_dir(root);
@@ -2155,6 +2288,9 @@ fn infer_torch_profile_from_installed_packages(root: &Path) -> Option<String> {
     }
     if ta_v.starts_with("2.8") && cuda_v.starts_with("12.8") {
         return Some("torch280_cu128".to_string());
+    }
+    if ta_v.starts_with("2.9") && cuda_v.starts_with("6.4") {
+        return Some("torch291_rocm64".to_string());
     }
     if ta_v.starts_with("2.9") && cuda_v.starts_with("13.0") {
         return Some("torch291_cu130".to_string());
@@ -2367,9 +2503,19 @@ fn apply_cuda_runtime_env_for_root(cmd: &mut std::process::Command, root: &Path)
     }
 }
 
+fn apply_torch_allocator_env_compat(cmd: &mut std::process::Command) {
+    if let Ok(value) = std::env::var("PYTORCH_CUDA_ALLOC_CONF") {
+        if std::env::var_os("PYTORCH_ALLOC_CONF").is_none() {
+            cmd.env("PYTORCH_ALLOC_CONF", value);
+        }
+        cmd.env_remove("PYTORCH_CUDA_ALLOC_CONF");
+    }
+}
+
 fn configure_python_runtime_env_for_root(cmd: &mut std::process::Command, root: &Path) {
     let mpl_cache = root.join(".venv").join("var").join("matplotlib");
     let _ = std::fs::create_dir_all(&mpl_cache);
+    apply_torch_allocator_env_compat(cmd);
     cmd.env("MPLBACKEND", "Agg");
     cmd.env("MPLCONFIGDIR", mpl_cache.to_string_lossy().to_string());
 }
@@ -2403,10 +2549,14 @@ fn python_module_importable(root: &Path, module: &str) -> bool {
 }
 
 fn comfyui_launch_args(
+    listen_enabled: bool,
     pinned_memory_enabled: bool,
     attention_backend: Option<&str>,
 ) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
+    if listen_enabled {
+        args.push("--listen".to_string());
+    }
     if !pinned_memory_enabled {
         args.push("--disable-pinned-memory".to_string());
     }
@@ -4456,6 +4606,7 @@ fn start_comfyui_root_impl(
     };
     cmd.arg("-W").arg("ignore::FutureWarning").arg(main_py);
     let launch_args = comfyui_launch_args(
+        settings.comfyui_listen_enabled,
         settings.comfyui_pinned_memory_enabled,
         effective_attention.as_deref(),
     );
@@ -4464,7 +4615,7 @@ fn start_comfyui_root_impl(
         "launch_args",
         format!(
             "Launching with attention backend: {}",
-            effective_attention.as_deref().unwrap_or("none")
+            effective_attention.as_deref().unwrap_or("PyTorch attention")
         ),
     );
     cmd.args(launch_args);
@@ -4652,6 +4803,10 @@ struct ComfyRuntimeEvent {
 #[derive(Debug, Serialize)]
 struct ComfyAddonState {
     torch_profile: Option<String>,
+    listen_enabled: bool,
+    launch_sage_attention: bool,
+    launch_sage_attention3: bool,
+    launch_flash_attention: bool,
     sage_attention: bool,
     sage_attention3: bool,
     flash_attention: bool,
@@ -4715,6 +4870,7 @@ fn python_for_root(root: &Path) -> std::process::Command {
     if !nerdstats_enabled() {
         apply_background_command_flags(&mut cmd);
     }
+    apply_torch_allocator_env_compat(&mut cmd);
     cmd
 }
 
@@ -4739,6 +4895,7 @@ fn python_exe_works(py_exe: &Path, root: &Path) -> bool {
     cmd.arg("--version");
     cmd.current_dir(root);
     apply_background_command_flags(&mut cmd);
+    apply_torch_allocator_env_compat(&mut cmd);
     cmd.output()
         .map(|out| out.status.success())
         .unwrap_or(false)
@@ -4952,19 +5109,19 @@ fn get_comfyui_addon_state(
         .map(|p| normalize_canonical_path(&std::fs::canonicalize(p).unwrap_or_else(|_| p.clone())))
         == Some(root.clone());
     let has_sage3 = python_module_importable(&root, "sageattn3");
-    let has_sage =
-        python_module_importable(&root, "sageattention") || python_module_importable(&root, "sageattn3");
+    let has_sage_pkg = python_module_importable(&root, "sageattention");
+    let has_sage = has_sage_pkg && !has_sage3;
     let has_flash = python_module_importable(&root, "flash_attn");
     let has_nunchaku = python_module_importable(&root, "nunchaku")
         || pip_has_package(&root, "nunchaku")
         || custom_node_exists(&root, "nunchaku_nodes")
         || custom_node_exists(&root, "ComfyUI-nunchaku");
-    let active_attention: String = if same_as_configured_root {
+    let launch_attention: String = if same_as_configured_root {
         match settings.comfyui_attention_backend.as_deref() {
             Some("none") => "none".to_string(),
             Some("flash") if has_flash => "flash".to_string(),
             Some("sage3") if has_sage3 => "sage3".to_string(),
-            Some("sage") if has_sage => "sage".to_string(),
+            Some("sage") if has_sage_pkg || has_sage3 => "sage".to_string(),
             Some("nunchaku") if has_nunchaku => "nunchaku".to_string(),
             _ => detect_launch_attention_backend_for_root(&root).unwrap_or_else(|| "none".to_string()),
         }
@@ -4980,10 +5137,14 @@ fn get_comfyui_addon_state(
                 None
             }
         }),
-        sage_attention: active_attention == "sage",
-        sage_attention3: active_attention == "sage3",
-        flash_attention: active_attention == "flash",
-        nunchaku: active_attention == "nunchaku",
+        listen_enabled: same_as_configured_root && settings.comfyui_listen_enabled,
+        launch_sage_attention: launch_attention == "sage",
+        launch_sage_attention3: launch_attention == "sage3",
+        launch_flash_attention: launch_attention == "flash",
+        sage_attention: has_sage,
+        sage_attention3: has_sage3,
+        flash_attention: has_flash,
+        nunchaku: has_nunchaku,
         insight_face: pip_has_package(&root, "insightface"),
         trellis2: custom_node_exists(&root, "ComfyUI-Trellis2")
             || custom_node_exists(&root, "ComfyUI-TRELLIS2"),
@@ -5005,6 +5166,14 @@ struct AttentionBackendChangeRequest {
     target_backend: String, // none | sage | sage3 | flash | nunchaku
     #[serde(default)]
     torch_profile: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LaunchAttentionFlagRequest {
+    #[serde(default)]
+    comfyui_root: Option<String>,
+    target_backend: String, // none | sage | sage3 | flash
 }
 
 #[derive(Debug, Deserialize)]
@@ -5215,6 +5384,71 @@ fn apply_attention_backend_change(
 
     restart_comfyui_after_mutation(&app, &state, was_running)?;
     Ok(format!("Applied attention backend: {target}"))
+}
+
+#[tauri::command]
+fn set_comfyui_launch_attention_backend(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    request: LaunchAttentionFlagRequest,
+) -> Result<String, String> {
+    let was_running = stop_comfyui_for_mutation(&app, &state)?;
+    let root = resolve_root_path(&state.context, request.comfyui_root)?;
+    let target = request.target_backend.trim().to_ascii_lowercase();
+    if !matches!(target.as_str(), "none" | "sage" | "sage3" | "flash") {
+        return Err("Unknown launch attention backend target.".to_string());
+    }
+
+    match target.as_str() {
+        "sage" => {
+            if !(python_module_importable(&root, "sageattention")
+                || python_module_importable(&root, "sageattn3"))
+            {
+                return Err(
+                    "SageAttention launch flag is unavailable because SageAttention is not installed."
+                        .to_string(),
+                );
+            }
+        }
+        "sage3" => {
+            if !python_module_importable(&root, "sageattn3") {
+                return Err(
+                    "SageAttention3 launch flag is unavailable because SageAttention3 is not installed."
+                        .to_string(),
+                );
+            }
+        }
+        "flash" => {
+            if !python_module_importable(&root, "flash_attn") {
+                return Err(
+                    "FlashAttention launch flag is unavailable because FlashAttention is not installed."
+                        .to_string(),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    let target_setting = match target.as_str() {
+        "sage" => Some("sage".to_string()),
+        "sage3" => Some("sage3".to_string()),
+        "flash" => Some("flash".to_string()),
+        _ => Some("none".to_string()),
+    };
+    state
+        .context
+        .config
+        .update_settings(|settings| settings.comfyui_attention_backend = target_setting)
+        .map_err(|err| err.to_string())?;
+
+    restart_comfyui_after_mutation(&app, &state, was_running)?;
+    Ok(match target.as_str() {
+        "none" => "ComfyUI launch attention flags disabled.".to_string(),
+        "sage" => "ComfyUI will launch with SageAttention.".to_string(),
+        "sage3" => "ComfyUI will launch with SageAttention3.".to_string(),
+        "flash" => "ComfyUI will launch with FlashAttention.".to_string(),
+        _ => unreachable!(),
+    })
 }
 
 fn remove_custom_node_dirs(root: &Path, names: &[&str]) {
@@ -5443,7 +5677,10 @@ async fn apply_comfyui_component_toggle(
         .to_string_lossy()
         .to_string();
 
-    let result = if matches!(component.as_str(), "addon_pinned_memory" | "pinned_memory") {
+    let result = if matches!(
+        component.as_str(),
+        "addon_pinned_memory" | "pinned_memory" | "launch_listen" | "addon_launch_listen"
+    ) {
         match component.as_str() {
             "addon_pinned_memory" | "pinned_memory" => {
                 let enabled = request.enabled;
@@ -5456,6 +5693,19 @@ async fn apply_comfyui_component_toggle(
                     Ok("Pinned memory enabled.".to_string())
                 } else {
                     Ok("Pinned memory disabled.".to_string())
+                }
+            }
+            "launch_listen" | "addon_launch_listen" => {
+                let enabled = request.enabled;
+                state
+                    .context
+                    .config
+                    .update_settings(|settings| settings.comfyui_listen_enabled = enabled)
+                    .map_err(|err| err.to_string())?;
+                if enabled {
+                    Ok("ComfyUI will start with --listen enabled.".to_string())
+                } else {
+                    Ok("ComfyUI will start without --listen.".to_string())
                 }
             }
             _ => Err("Unknown component toggle target.".to_string()),
@@ -6191,6 +6441,7 @@ fn main() {
             get_comfyui_resume_state,
             get_comfyui_addon_state,
             apply_attention_backend_change,
+            set_comfyui_launch_attention_backend,
             apply_comfyui_component_toggle,
             get_comfyui_update_status,
             update_selected_comfyui,

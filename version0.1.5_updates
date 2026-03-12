@@ -1,0 +1,118 @@
+ArcticDownloader 0.1.5 update log
+
+Purpose:
+- Track code changes made in the Linux workspace so they can be mirrored in the Windows workspace.
+
+Format:
+- Date
+- Change summary
+- Files changed
+- Notes
+
+Entries:
+- 2026-03-12
+  - Initialized this tracking file for upcoming 0.1.5 bug fixes and enhancements.
+  - Files changed:
+    - version0.1.5_updates
+  - Notes:
+    - No application code changes yet.
+- 2026-03-12
+  - Fixed ComfyUI/PyTorch runtime compatibility warning caused by the deprecated `PYTORCH_CUDA_ALLOC_CONF` environment variable being inherited by spawned Python processes.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - Added a Python process environment compatibility helper.
+    - If `PYTORCH_CUDA_ALLOC_CONF` is present and `PYTORCH_ALLOC_CONF` is not, the app now copies the value to `PYTORCH_ALLOC_CONF`.
+    - The app removes `PYTORCH_CUDA_ALLOC_CONF` from child Python processes to avoid the PyTorch deprecation warning.
+    - Applied this to ComfyUI launch, Python runtime detection, and torch profile verification commands.
+- 2026-03-12
+  - Added an "Enable Server on Launch (--listen)" checkbox for managed ComfyUI installs so users can start ComfyUI with the `--listen` flag from the app.
+  - Files changed:
+    - src/config.rs
+    - src-tauri/src/main.rs
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - Added a persisted `comfyui_listen_enabled` setting with default `false`.
+    - ComfyUI launch arguments now include `--listen` when that setting is enabled.
+    - Added a UI checkbox labeled `Enable Server on Launch (--listen)`.
+    - The checkbox state is loaded from saved settings and can be toggled from the existing ComfyUI manage flow.
+- 2026-03-12
+  - Refined the ComfyUI launch controls by adding a dedicated `Flags` section below `Custom-Nodes` and separating install state from launch state.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - Added a `Flags` section with launch toggles for `SageAttention`, `SageAttention3`, `FlashAttention`, and `--listen`.
+    - Add-On checkboxes now represent what is installed, while Flag checkboxes represent what should be enabled when ComfyUI starts.
+    - Installing `SageAttention`, `SageAttention3`, or `FlashAttention` still enables the matching launch flag by default.
+    - Users can now keep those add-ons installed but disable their launch flags temporarily to start ComfyUI without them.
+    - Added a new backend command to change launch attention flags without reinstalling or removing the add-ons.
+- 2026-03-12
+  - Updated the `Flags` section labels to show the actual ComfyUI CLI flags instead of descriptive "Launch with ..." text.
+  - Files changed:
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - Changed visible labels to `--use-sage-attention`, `--use-flash-attention`, and `--listen`.
+    - Aligned the `--listen` confirmation text with the new label.
+- 2026-03-12
+  - Simplified the `Flags` section by removing the duplicate SageAttention3 entry because SageAttention and SageAttention3 use the same visible ComfyUI flag.
+  - Files changed:
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - The UI now shows a single `--use-sage-attention` checkbox.
+    - That single checkbox reflects either saved Sage launch mode (`sage` or `sage3`).
+    - When users enable the Sage flag, the UI maps it to `sage3` if SageAttention3 is the installed Sage backend; otherwise it maps to regular `sage`.
+- 2026-03-12
+  - Clarified the ComfyUI runtime log message for the default attention path.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - When no special attention backend flag is active, the log now says `Launching with attention backend: PyTorch attention` instead of `none`.
+- 2026-03-12
+  - Added a manual AMD ROCm install option for the Linux ComfyUI installer.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - Added a new torch profile option: `Torch 2.9.1 + ROCm 6.4`.
+    - The installer now installs that profile from the PyTorch ROCm wheel index and detects/verifies ROCm runtime versions correctly.
+    - ROCm installs skip the CUDA-specific Triton package step used by the CUDA profiles.
+    - Added guardrails so CUDA-only add-ons in this app (`SageAttention`, `SageAttention3`, `FlashAttention`, `Nunchaku`, and `Trellis2`) are blocked for ROCm profiles.
+    - Updated the UI recommendation copy so AMD users are told to select the ROCm profile manually instead of seeing a misleading CUDA recommendation.
+- 2026-03-12
+  - Added AMD GPU auto-detection for the Linux ComfyUI installer so ROCm is selected automatically and CUDA torch profiles are disabled.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - Added lightweight AMD GPU detection on Linux using `lspci`.
+    - If an AMD GPU is detected, the installer now recommends and auto-selects `Torch 2.9.1 + ROCm 6.4`.
+    - When AMD is detected, NVIDIA/CUDA torch profiles are disabled in the dropdown so the user cannot pick them.
+    - Updated the title/system GPU text to show AMD GPU detection in the UI.
+- 2026-03-12
+  - Restricted the ROCm torch profile for detected NVIDIA systems.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.1.5_updates
+  - Notes:
+    - If an NVIDIA GPU is detected, the ROCm torch profile is now disabled in the installer dropdown.
+    - If the UI somehow lands on the ROCm profile while NVIDIA is detected, it falls back to a CUDA profile automatically.
+- 2026-03-12
+  - Added a human-readable 0.1.5 changelog file for release notes and cross-platform handoff.
+  - Files changed:
+    - CHANGELOG_0.1.5.md
+    - version0.1.5_updates
+  - Notes:
+    - Summarizes the implemented fixes and enhancements in user-facing language.

@@ -135,6 +135,8 @@ pub struct AppSettings {
     pub last_installed_version: Option<String>,
     #[serde(default = "default_true")]
     pub comfyui_pinned_memory_enabled: bool,
+    #[serde(default)]
+    pub comfyui_listen_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comfyui_attention_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -169,6 +171,7 @@ impl Default for AppSettings {
             civitai_token: None,
             last_installed_version: None,
             comfyui_pinned_memory_enabled: true,
+            comfyui_listen_enabled: false,
             comfyui_attention_backend: None,
             comfyui_torch_profile: None,
             hf_xet_enabled: false,

@@ -37,7 +37,8 @@ const state = {
   comfyLastUpdateDetailLogKey: "",
   comfyTorchProfileLocked: false,
   comfyAddonLoadSeq: 0,
-  comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for your GPU",
+  comfyDetectedGpuVendor: "",
+  comfyTorchRecommendedBase: "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected.",
   sharedModelsRootDefault: "",
   sharedModelsUseDefault: false,
 };
@@ -60,6 +61,7 @@ const vramOptions = [
 const comfyTorchProfiles = [
   { value: "torch271_cu128", label: "Torch 2.7.1 + cu128" },
   { value: "torch280_cu128", label: "Torch 2.8.0 + cu128" },
+  { value: "torch291_rocm64", label: "Torch 2.9.1 + ROCm 6.4" },
   { value: "torch291_cu130", label: "Torch 2.9.1 + cu130" },
 ];
 
@@ -124,6 +126,9 @@ const el = {
   addonNunchaku: document.getElementById("addon-nunchaku"),
   addonTrellis2: document.getElementById("addon-trellis2"),
   addonPinnedMemory: document.getElementById("addon-pinned-memory"),
+  flagSageAttention: document.getElementById("flag-sageattention"),
+  flagFlashAttention: document.getElementById("flag-flashattention"),
+  launchListen: document.getElementById("launch-listen"),
   nodeComfyuiManager: document.getElementById("node-comfyui-manager"),
   nodeComfyuiEasyUse: document.getElementById("node-comfyui-easy-use"),
   nodeRgthreeComfy: document.getElementById("node-rgthree-comfy"),
@@ -514,6 +519,9 @@ function resetComfySelectionsToDefaults() {
   if (el.addonInsightFace) el.addonInsightFace.checked = false;
   if (el.addonTrellis2) el.addonTrellis2.checked = false;
   if (el.addonPinnedMemory) el.addonPinnedMemory.checked = true;
+  if (el.flagSageAttention) el.flagSageAttention.checked = false;
+  if (el.flagFlashAttention) el.flagFlashAttention.checked = false;
+  if (el.launchListen) el.launchListen.checked = false;
 
   if (el.nodeComfyuiManager) el.nodeComfyuiManager.checked = false;
   if (el.nodeComfyuiEasyUse) el.nodeComfyuiEasyUse.checked = false;
@@ -546,6 +554,13 @@ async function loadInstalledAddonState(comfyuiRoot) {
     if (el.addonNunchaku) el.addonNunchaku.checked = Boolean(installed?.nunchaku);
     if (el.addonInsightFace) el.addonInsightFace.checked = Boolean(installed?.insight_face);
     if (el.addonTrellis2) el.addonTrellis2.checked = Boolean(installed?.trellis2);
+    if (el.flagSageAttention) {
+      el.flagSageAttention.checked = Boolean(
+        installed?.launch_sage_attention || installed?.launch_sage_attention3
+      );
+    }
+    if (el.flagFlashAttention) el.flagFlashAttention.checked = Boolean(installed?.launch_flash_attention);
+    if (el.launchListen) el.launchListen.checked = Boolean(installed?.listen_enabled);
 
     if (el.nodeComfyuiManager) el.nodeComfyuiManager.checked = Boolean(installed?.node_comfyui_manager);
     if (el.nodeComfyuiEasyUse) el.nodeComfyuiEasyUse.checked = Boolean(installed?.node_comfyui_easy_use);
@@ -612,6 +627,32 @@ function enforceExclusiveAttentionSelectionLocal(changedBox) {
   });
 }
 
+function attentionFlagEntries() {
+  return [
+    {
+      box: el.flagSageAttention,
+      backend: () => (el.addonSageAttention3?.checked ? "sage3" : "sage"),
+      label: "SageAttention",
+    },
+    { box: el.flagFlashAttention, backend: "flash", label: "FlashAttention" },
+  ].filter((entry) => Boolean(entry.box));
+}
+
+function attentionFlagEntryForBox(box) {
+  return attentionFlagEntries().find((entry) => entry.box === box) || null;
+}
+
+function checkedAttentionFlagEntries(exceptBox = null) {
+  return attentionFlagEntries().filter((entry) => entry.box !== exceptBox && entry.box.checked);
+}
+
+function enforceExclusiveAttentionFlagSelectionLocal(changedBox) {
+  if (!changedBox?.checked) return;
+  checkedAttentionFlagEntries(changedBox).forEach((entry) => {
+    entry.box.checked = false;
+  });
+}
+
 async function applyAttentionBackendFromToggle(changedBox) {
   if (!changedBox) return;
   if (state.comfyMode !== "manage") {
@@ -673,6 +714,52 @@ async function applyAttentionBackendFromToggle(changedBox) {
   }
 }
 
+async function applyLaunchAttentionFlagFromToggle(changedBox) {
+  if (!changedBox) return;
+  enforceExclusiveAttentionFlagSelectionLocal(changedBox);
+  if (state.comfyMode !== "manage") {
+    return;
+  }
+  if (state.comfyAttentionBusy) return;
+
+  const root = String(el.comfyRoot.value || "").trim();
+  if (!root) {
+    logComfyLine("Set ComfyUI folder first.");
+    changedBox.checked = !changedBox.checked;
+    return;
+  }
+
+  const changed = attentionFlagEntryForBox(changedBox);
+  if (!changed) return;
+  const targetBackend = changedBox.checked
+    ? (typeof changed.backend === "function" ? changed.backend() : changed.backend)
+    : "none";
+
+  await waitForNextPaint();
+  state.comfyAttentionBusy = true;
+  updateComfyRuntimeButton();
+  setToggleBusy(changedBox, true);
+  try {
+    const result = await invoke("set_comfyui_launch_attention_backend", {
+      request: {
+        comfyuiRoot: root,
+        targetBackend,
+      },
+    });
+    if (result) {
+      logComfyLine(String(result));
+    }
+    await loadInstalledAddonState(root);
+  } catch (err) {
+    logComfyLine(`Launch flag change failed: ${err}`);
+    await loadInstalledAddonState(root);
+  } finally {
+    state.comfyAttentionBusy = false;
+    updateComfyRuntimeButton();
+    setToggleBusy(changedBox, false);
+  }
+}
+
 async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   if (!changedBox || state.comfyComponentBusy) return;
   if (state.comfyMode !== "manage") {
@@ -686,7 +773,11 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   }
 
   const enabling = Boolean(changedBox.checked);
-  const action = enabling ? "install" : "remove";
+  const action = (
+    component === "launch_listen" || component === "addon_launch_listen"
+      ? (enabling ? "enable" : "disable")
+      : (enabling ? "install" : "remove")
+  );
   const ok = await showConfirmDialog(`Are you sure you want to ${action} '${label}'?`);
   if (!ok) {
     changedBox.checked = !changedBox.checked;
@@ -717,6 +808,12 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
       try {
         const settings = await invoke("get_settings");
         el.addonPinnedMemory.checked = settings?.comfyui_pinned_memory_enabled !== false;
+      } catch (_) {}
+    }
+    if ((component === "launch_listen" || component === "addon_launch_listen") && el.launchListen) {
+      try {
+        const settings = await invoke("get_settings");
+        el.launchListen.checked = settings?.comfyui_listen_enabled === true;
       } catch (_) {}
     }
     state.comfyComponentBusy = false;
@@ -1184,6 +1281,9 @@ async function startComfyInstall(forceFresh) {
 }
 
 function applyComfyAddonRules() {
+  const profile = String(el.comfyTorchProfile?.value || "").trim();
+  const rocmSelected = profile === "torch291_rocm64";
+
   if (el.addonSageAttention3) {
     const wasChecked = el.addonSageAttention3.checked;
     el.addonSageAttention3.disabled = !state.comfySage3Eligible;
@@ -1193,7 +1293,6 @@ function applyComfyAddonRules() {
   }
 
   if (el.addonTrellis2) {
-    const profile = String(el.comfyTorchProfile?.value || "").trim();
     const trellisAllowed = profile === "torch280_cu128";
     const wasChecked = el.addonTrellis2.checked;
     el.addonTrellis2.disabled = !trellisAllowed;
@@ -1201,6 +1300,29 @@ function applyComfyAddonRules() {
       el.addonTrellis2.checked = false;
     }
   }
+
+  [
+    el.addonSageAttention,
+    el.addonSageAttention3,
+    el.addonFlashAttention,
+    el.addonNunchaku,
+  ].forEach((box) => {
+    if (!box) return;
+    const wasChecked = box.checked;
+    box.disabled = rocmSelected;
+    if (rocmSelected && wasChecked) {
+      box.checked = false;
+    }
+  });
+
+  [el.flagSageAttention, el.flagFlashAttention].forEach((box) => {
+    if (!box) return;
+    const wasChecked = box.checked;
+    box.disabled = rocmSelected;
+    if (rocmSelected && wasChecked) {
+      box.checked = false;
+    }
+  });
 
   if (el.addonNunchaku && el.addonInsightFace) {
     const nunchakuSelected = Boolean(el.addonNunchaku.checked);
@@ -1582,10 +1704,44 @@ function setOptions(select, options, selectedValue = null) {
     const opt = document.createElement("option");
     opt.value = item.value;
     opt.textContent = item.label;
+    opt.disabled = Boolean(item.disabled);
     select.appendChild(opt);
   });
   if (options.find((item) => item.value === current)) {
     select.value = current;
+  }
+}
+
+function comfyTorchProfileOptionsForDetectedGpu() {
+  const vendor = String(state.comfyDetectedGpuVendor || "").toLowerCase();
+  if (vendor === "amd") {
+    return comfyTorchProfiles.map((item) => ({
+      ...item,
+      disabled: item.value !== "torch291_rocm64",
+    }));
+  }
+  if (vendor === "nvidia") {
+    return comfyTorchProfiles.map((item) => ({
+      ...item,
+      disabled: item.value === "torch291_rocm64",
+    }));
+  }
+  return comfyTorchProfiles.map((item) => ({ ...item, disabled: false }));
+}
+
+function applyComfyTorchProfileOptions(selectedValue = null) {
+  if (!el.comfyTorchProfile) return;
+  const options = comfyTorchProfileOptionsForDetectedGpu();
+  const vendor = String(state.comfyDetectedGpuVendor || "").toLowerCase();
+  const forcedValue = vendor === "amd" ? "torch291_rocm64" : selectedValue;
+  setOptions(el.comfyTorchProfile, options, forcedValue);
+  if (vendor === "amd") {
+    el.comfyTorchProfile.value = "torch291_rocm64";
+  } else if (vendor === "nvidia" && el.comfyTorchProfile.value === "torch291_rocm64") {
+    const fallback = selectedValue && selectedValue !== "torch291_rocm64"
+      ? selectedValue
+      : "torch280_cu128";
+    el.comfyTorchProfile.value = fallback;
   }
 }
 
@@ -1786,14 +1942,21 @@ async function bootstrap() {
         const ramRaw = Number(snapshot.total_ram_gb);
         const ramGb = Number.isFinite(ramRaw) ? (ramRaw > 1000 ? ramRaw / 1000 : ramRaw) : null;
         const ramText = `${ramGb != null ? ramGb.toFixed(1) : "?"} GB RAM`;
-        const gpuText = snapshot.nvidia_gpu_name
-          ? `${snapshot.nvidia_gpu_name}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
-          : "NVIDIA GPU: Not detected";
+        const amdGpu = String(snapshot.amd_gpu_name || "").trim();
+        const nvidiaGpu = String(snapshot.nvidia_gpu_name || "").trim();
+        state.comfyDetectedGpuVendor = amdGpu ? "amd" : (nvidiaGpu ? "nvidia" : "");
+        const gpuText = amdGpu
+          ? `AMD GPU: ${amdGpu}`
+          : (nvidiaGpu
+            ? `${nvidiaGpu}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
+            : "GPU: Not detected");
         state.appVersion = snapshot.version || state.appVersion;
         state.titleSystemText = `${ramText}${DOT_SEP}${gpuText}`;
+        applyComfyTorchProfileOptions(el.comfyTorchProfile?.value || null);
+        applyComfyAddonRules();
         renderAppVersionTag();
         renderTitleMeta();
-        if (!snapshot.nvidia_gpu_name && attempt < 8) {
+        if (!amdGpu && !nvidiaGpu && attempt < 8) {
           setTimeout(() => refreshSnapshot(attempt + 1), 600);
         }
       })
@@ -1828,13 +1991,29 @@ async function bootstrap() {
   if (el.addonPinnedMemory) {
     el.addonPinnedMemory.checked = settings.comfyui_pinned_memory_enabled !== false;
   }
+  if (el.flagSageAttention) {
+    el.flagSageAttention.checked = (
+      settings.comfyui_attention_backend === "sage"
+      || settings.comfyui_attention_backend === "sage3"
+    );
+  }
+  if (el.flagFlashAttention) {
+    el.flagFlashAttention.checked = settings.comfyui_attention_backend === "flash";
+  }
+  if (el.launchListen) {
+    el.launchListen.checked = settings.comfyui_listen_enabled === true;
+  }
   if (el.enableHfXet) {
     el.enableHfXet.checked = settings.hf_xet_enabled === true;
   }
   setComfyQuickActions(settings.comfyui_last_install_dir || "", settings.comfyui_root || "");
-  setOptions(el.comfyTorchProfile, comfyTorchProfiles);
+  applyComfyTorchProfileOptions();
   const savedTorchProfile = String(settings.comfyui_torch_profile || "").trim();
-  if (savedTorchProfile && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)) {
+  if (
+    savedTorchProfile
+    && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)
+    && state.comfyDetectedGpuVendor !== "amd"
+  ) {
     el.comfyTorchProfile.value = savedTorchProfile;
     state.comfyTorchProfileLocked = true;
   }
@@ -1842,10 +2021,19 @@ async function bootstrap() {
   const refreshRecommendation = (attempt = 0) => {
     invoke("get_comfyui_install_recommendation")
       .then((reco) => {
-        state.comfyTorchRecommendedBase = `Recommended '${reco.torch_label}' for your GPU`;
+        const recoReason = String(reco.reason || "").toLowerCase();
+        state.comfyTorchRecommendedBase = recoReason.includes("detected amd gpu")
+          ? "Detected AMD GPU. Auto-selected 'Torch 2.9.1 + ROCm 6.4'."
+          : (recoReason.includes("non-nvidia")
+            ? "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected."
+            : `Recommended '${reco.torch_label}' for your GPU`);
         setTorchRecommendedDetecting(false);
         state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
-        if (!state.comfyTorchProfileLocked && comfyTorchProfiles.some((x) => x.value === reco.torch_profile)) {
+        if (
+          comfyTorchProfiles.some((x) => x.value === reco.torch_profile)
+          && (state.comfyDetectedGpuVendor === "amd" || !state.comfyTorchProfileLocked)
+        ) {
+          applyComfyTorchProfileOptions(reco.torch_profile);
           el.comfyTorchProfile.value = reco.torch_profile;
         }
         applyComfyAddonRules();
@@ -1854,9 +2042,12 @@ async function bootstrap() {
         }
       })
       .catch((err) => {
-        state.comfyTorchRecommendedBase = "Recommended 'Torch 2.8.0 + cu128' for your GPU";
+        state.comfyTorchRecommendedBase = "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected.";
         setTorchRecommendedDetecting(false);
-        if (!state.comfyTorchProfileLocked) {
+        if (state.comfyDetectedGpuVendor === "amd") {
+          applyComfyTorchProfileOptions("torch291_rocm64");
+          el.comfyTorchProfile.value = "torch291_rocm64";
+        } else if (!state.comfyTorchProfileLocked) {
           el.comfyTorchProfile.value = "torch280_cu128";
         }
         state.comfySage3Eligible = false;
@@ -2284,6 +2475,12 @@ el.addonSageAttention3?.addEventListener("change", () => {
 el.addonFlashAttention?.addEventListener("change", () => {
   applyAttentionBackendFromToggle(el.addonFlashAttention).catch((err) => logComfyLine(String(err)));
 });
+el.flagSageAttention?.addEventListener("change", () => {
+  applyLaunchAttentionFlagFromToggle(el.flagSageAttention).catch((err) => logComfyLine(String(err)));
+});
+el.flagFlashAttention?.addEventListener("change", () => {
+  applyLaunchAttentionFlagFromToggle(el.flagFlashAttention).catch((err) => logComfyLine(String(err)));
+});
 el.addonNunchaku?.addEventListener("change", () => {
   applyComfyAddonRules();
   applyAttentionBackendFromToggle(el.addonNunchaku).catch((err) => logComfyLine(String(err)));
@@ -2298,6 +2495,10 @@ el.addonTrellis2?.addEventListener("change", () => {
 });
 el.addonPinnedMemory?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.addonPinnedMemory, "addon_pinned_memory", "Pinned Memory")
+    .catch((err) => logComfyLine(String(err)));
+});
+el.launchListen?.addEventListener("change", () => {
+  applyComponentToggleFromCheckbox(el.launchListen, "launch_listen", "--listen")
     .catch((err) => logComfyLine(String(err)));
 });
 el.nodeComfyuiManager?.addEventListener("change", () => {
