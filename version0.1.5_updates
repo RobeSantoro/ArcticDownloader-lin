@@ -354,3 +354,10 @@ Entries:
   - Notes:
     - If `nvidia-smi` detects an NVIDIA GPU, the app now suppresses the fallback AMD GPU name from `lspci` for UI detection and torch-profile recommendation logic.
     - Prevents Ryzen/Granite Ridge integrated graphics from incorrectly making the app appear to be an AMD GPU system when an NVIDIA card is the actual active accelerator.
+- 2026-03-13
+  - Added a new 0.1.6 changelog file for the Linux GPU detection fix.
+  - Files changed:
+    - CHANGELOG_0.1.6.md
+    - version0.1.5_updates
+  - Notes:
+    - Added release-note style text describing the NVIDIA-vs-AMD GPU detection priority fix for Linux systems with AMD integrated graphics and NVIDIA discrete GPUs.
