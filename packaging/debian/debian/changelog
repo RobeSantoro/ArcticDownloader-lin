@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.1.7-1) unstable; urgency=medium
+
+  * Added Linux Intel GPU support for ComfyUI installs with a new `Torch 2.9.1 + XPU` option.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Sat, 14 Mar 2026 14:15:04 -0400
+
 arctic-comfyui-helper (0.1.6-1) unstable; urgency=medium
 
   * Fixed Linux GPU detection priority so NVIDIA GPUs are no longer overridden by detected AMD integrated graphics.
