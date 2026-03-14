@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.1.6-1) unstable; urgency=medium
+
+  * Fixed Linux GPU detection priority so NVIDIA GPUs are no longer overridden by detected AMD integrated graphics.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Fri, 13 Mar 2026 22:38:24 -0400
+
 arctic-comfyui-helper (0.1.5-1) unstable; urgency=medium
 
   * Added a new `Flags` section for ComfyUI launch options.
