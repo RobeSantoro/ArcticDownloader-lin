@@ -346,3 +346,11 @@ Entries:
   - Notes:
     - Added `--publish-aur` and `--publish-all`.
     - The build script can now update `packaging/aur-bin`, sync it into the local AUR git checkout, commit, and push it as part of the same release command.
+- 2026-03-13
+  - Fixed Linux GPU detection priority so NVIDIA cards are not overridden by detected AMD integrated graphics.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.5_updates
+  - Notes:
+    - If `nvidia-smi` detects an NVIDIA GPU, the app now suppresses the fallback AMD GPU name from `lspci` for UI detection and torch-profile recommendation logic.
+    - Prevents Ryzen/Granite Ridge integrated graphics from incorrectly making the app appear to be an AMD GPU system when an NVIDIA card is the actual active accelerator.

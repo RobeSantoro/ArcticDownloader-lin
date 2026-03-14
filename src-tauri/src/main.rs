@@ -624,6 +624,9 @@ fn detect_amd_gpu_name() -> Option<String> {
     if fake_amd_enabled() {
         return Some("Fake AMD GPU (simulation)".to_string());
     }
+    if detect_nvidia_gpu_details().name.is_some() {
+        return None;
+    }
     detect_amd_gpu_details().name
 }
 
