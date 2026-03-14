@@ -1,0 +1,115 @@
+ArcticDownloader 0.1.7 update log
+
+Purpose:
+- Track code changes made in the Linux workspace so they can be mirrored in the Windows workspace.
+
+Format:
+- Date
+- Change summary
+- Files changed
+- Notes
+
+Entries:
+- 2026-03-14
+  - Fixed Linux app update detection so the running binary version is used instead of the last stored installed-version setting.
+  - Files changed:
+    - src/app.rs
+    - version0.1.7_updates
+  - Notes:
+    - Prevents older installed Linux builds from thinking they are already on a newer version just because `last_installed_version` in settings was ahead of the real binary version.
+    - Fixes the case where a 0.1.5 install failed to detect 0.1.6 as available.
+- 2026-03-14
+  - Added visible feedback for the Linux app `Check Updates` button.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.1.7_updates
+  - Notes:
+    - The button now switches to `Checking...` and disables itself while the update request is running.
+    - The update status text now also shows `Checking...` during a manual check so the action no longer looks inert.
+- 2026-03-14
+  - Added first-pass Linux Intel GPU support for ComfyUI installation.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - src-tauri/dist/main.js
+    - version0.1.7_updates
+  - Notes:
+    - Added Linux Intel GPU detection and snapshot reporting.
+    - Added a new installer torch profile: `Torch 2.9.1 + XPU`.
+    - Intel GPU systems now auto-select the XPU profile in the ComfyUI installer and disable CUDA/ROCm-only profile choices.
+    - Added preflight checks and compatibility guardrails so CUDA-only add-ons (`SageAttention`, `SageAttention3`, `FlashAttention`, `Nunchaku`, `Trellis2`) are blocked for Intel XPU installs.
+    - Added installed-profile detection and torch verification support for XPU environments.
+- 2026-03-14
+  - Added guided Intel XPU setup on Linux, reusing the same installer section used for ROCm.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - src-tauri/dist/main.js
+    - version0.1.7_updates
+  - Notes:
+    - Added backend Intel guided setup commands and Intel runtime status checks for Debian-based, Fedora, and Arch Linux families.
+    - The existing ROCm setup row in the UI now switches automatically between AMD ROCm and Intel XPU labels, buttons, and backend commands.
+    - Intel XPU preflight now checks runtime readiness instead of only checking for Intel GPU detection.
+    - Guided Intel setup installs Intel runtime packages, adds the current user to `render` and `video` groups, and tells the user to log out and back in before rechecking when needed.
+- 2026-03-14
+  - Added fake Intel launch flags for testing Intel/XPU UI and guided setup flows on non-Intel systems.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.7_updates
+  - Notes:
+    - `--fakeintel` simulates Intel GPU detection and Intel XPU readiness for safe UI testing.
+    - `--fakeintel-allow-xpu-setup` enables the real guided Intel package-install flow while still simulating Intel GPU detection, matching the AMD test-mode pattern.
+- 2026-03-14
+  - Changed the Linux Intel/XPU torch install path to also install Triton XPU.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.7_updates
+  - Notes:
+    - `Torch 2.9.1 + XPU` now installs `triton-xpu` from `https://download.pytorch.org/whl/cu80/triton-xpu/` after the core torch packages are installed.
+    - NVIDIA and ROCm Triton behavior was left unchanged.
+- 2026-03-14
+  - Fixed the Linux Intel/XPU Triton package name for the installer.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.7_updates
+  - Notes:
+    - The Intel/XPU install path now requests `pytorch-triton-xpu` instead of the invalid `triton-xpu` package name.
+- 2026-03-14
+  - Clarified Linux preflight messaging so the selected torch profile is shown in the UI and log.
+  - Files changed:
+    - src-tauri/dist/main.js
+    - version0.1.7_updates
+  - Notes:
+    - Preflight now shows which torch profile it is evaluating.
+    - Managed installs now log the detected installed torch profile so ROCm/XPU mismatches are easier to understand during simulation and testing.
+- 2026-03-14
+  - Fixed Linux Intel/XPU Triton installation to use the direct wheel URL instead of package-index resolution.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.7_updates
+  - Notes:
+    - The installer now pulls the CPython 3.12 `triton_xpu` wheel directly from the PyTorch wheel host, avoiding `uv` resolution failures against the package-specific index.
+- 2026-03-14
+  - Fixed the direct Linux Intel/XPU Triton wheel URL path.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.7_updates
+  - Notes:
+    - The PyTorch index page is under `/whl/cu80/triton-xpu/`, but the actual wheel download URL resolves under `/whl/`.
+- 2026-03-14
+  - Added more optional ComfyUI launch flags to the Flags section.
+  - Files changed:
+    - src/config.rs
+    - src-tauri/src/main.rs
+    - src-tauri/dist/index.html
+    - src-tauri/dist/main.js
+    - version0.1.7_updates
+  - Notes:
+    - Added `--lowvram`, `--bf16-unet`, `--async-offload`, and `--disable-smart-memory` to the UI.
+    - These flags are now stored in app settings and applied when launching ComfyUI.
+    - Launch-only toggles now work from both `Install New` and `Manage Existing`, matching how users expect global startup flags to behave.
+- 2026-03-14
+  - Created a human-readable changelog file for version 0.1.7.
+  - Files changed:
+    - CHANGELOG_0.1.7.md
+    - version0.1.7_updates
+  - Notes:
+    - The changelog is written in short release-note style for GitHub releases and summarizes the updater fixes, Intel/XPU support, guided Intel setup, new startup flags, and key Linux GPU detection fixes.

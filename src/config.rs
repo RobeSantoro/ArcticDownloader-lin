@@ -137,6 +137,14 @@ pub struct AppSettings {
     pub comfyui_pinned_memory_enabled: bool,
     #[serde(default)]
     pub comfyui_listen_enabled: bool,
+    #[serde(default)]
+    pub comfyui_lowvram_enabled: bool,
+    #[serde(default)]
+    pub comfyui_bf16_unet_enabled: bool,
+    #[serde(default)]
+    pub comfyui_async_offload_enabled: bool,
+    #[serde(default)]
+    pub comfyui_disable_smart_memory_enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comfyui_attention_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +180,10 @@ impl Default for AppSettings {
             last_installed_version: None,
             comfyui_pinned_memory_enabled: true,
             comfyui_listen_enabled: false,
+            comfyui_lowvram_enabled: false,
+            comfyui_bf16_unet_enabled: false,
+            comfyui_async_offload_enabled: false,
+            comfyui_disable_smart_memory_enabled: false,
             comfyui_attention_backend: None,
             comfyui_torch_profile: None,
             hf_xet_enabled: false,

@@ -27,6 +27,7 @@ const state = {
   updateAvailable: false,
   updateVersion: null,
   appVersion: "0.1.0",
+  updateChecking: false,
   updateInstalling: false,
   selectedComfyVersion: null,
   titleSystemText: "Loading system info...",
@@ -64,8 +65,14 @@ const comfyTorchProfiles = [
   { value: "torch271_cu128", label: "Torch 2.7.1 + cu128" },
   { value: "torch280_cu128", label: "Torch 2.8.0 + cu128" },
   { value: "torch291_rocm64", label: "Torch 2.9.1 + ROCm 6.4" },
+  { value: "torch291_xpu", label: "Torch 2.9.1 + XPU" },
   { value: "torch291_cu130", label: "Torch 2.9.1 + cu130" },
 ];
+
+function torchProfileLabel(profile) {
+  const value = String(profile || "").trim();
+  return comfyTorchProfiles.find((item) => item.value === value)?.label || value || "Unknown profile";
+}
 
 const el = {
   version: document.getElementById("version"),
@@ -136,6 +143,10 @@ const el = {
   flagSageAttention: document.getElementById("flag-sageattention"),
   flagFlashAttention: document.getElementById("flag-flashattention"),
   launchListen: document.getElementById("launch-listen"),
+  flagLowvram: document.getElementById("flag-lowvram"),
+  flagBf16Unet: document.getElementById("flag-bf16-unet"),
+  flagAsyncOffload: document.getElementById("flag-async-offload"),
+  flagDisableSmartMemory: document.getElementById("flag-disable-smart-memory"),
   nodeComfyuiManager: document.getElementById("node-comfyui-manager"),
   nodeComfyuiEasyUse: document.getElementById("node-comfyui-easy-use"),
   nodeRgthreeComfy: document.getElementById("node-rgthree-comfy"),
@@ -402,6 +413,12 @@ function updateComfyUpdateButton() {
 function updateUpdateButton() {
   if (!el.checkUpdates) return;
   el.checkUpdates.classList.remove("update-available");
+  if (state.updateChecking) {
+    el.checkUpdates.textContent = "Checking...";
+    el.checkUpdates.disabled = true;
+    renderAppVersionTag();
+    return;
+  }
   if (state.updateInstalling) {
     el.checkUpdates.textContent = "Updating...";
     el.checkUpdates.disabled = true;
@@ -437,11 +454,40 @@ function setTorchRecommendedDetecting(detecting) {
   }
 }
 
-function updateRocmGuidedUi() {
+function currentGuidedAccelTarget() {
   const profile = String(el.comfyTorchProfile?.value || "").trim();
+  if (state.comfyDetectedGpuVendor === "amd" || profile === "torch291_rocm64") {
+    return {
+      key: "rocm",
+      statusLabel: "ROCm status",
+      checkLabel: "Check ROCm",
+      installLabel: "Guided ROCm Setup",
+      checkCommand: "get_rocm_guided_status",
+      installCommand: "install_rocm_guided",
+      logPrefix: "ROCm",
+      detectedField: "amd_detected",
+    };
+  }
+  if (state.comfyDetectedGpuVendor === "intel" || profile === "torch291_xpu") {
+    return {
+      key: "xpu",
+      statusLabel: "Intel XPU status",
+      checkLabel: "Check Intel XPU",
+      installLabel: "Guided Intel Setup",
+      checkCommand: "get_xpu_guided_status",
+      installCommand: "install_xpu_guided",
+      logPrefix: "Intel XPU",
+      detectedField: "intel_detected",
+    };
+  }
+  return null;
+}
+
+function updateRocmGuidedUi() {
+  const target = currentGuidedAccelTarget();
   const status = state.rocmGuidedStatus;
-  const rocmRelevant = state.comfyDetectedGpuVendor === "amd" || profile === "torch291_rocm64";
-  const show = rocmRelevant && !status?.ready;
+  const statusMatchesTarget = status?.target === target?.key;
+  const show = Boolean(target) && !(statusMatchesTarget && status?.ready);
   if (el.rocmGuidedRow) {
     el.rocmGuidedRow.classList.toggle("hidden", !show);
   }
@@ -452,37 +498,45 @@ function updateRocmGuidedUi() {
     return;
   }
   if (el.rocmGuidedStatus) {
-    el.rocmGuidedStatus.textContent = status?.detail
-      ? `ROCm status: ${status.detail}`
-      : "ROCm status: Not checked.";
+    el.rocmGuidedStatus.textContent = statusMatchesTarget && status?.detail
+      ? `${target.statusLabel}: ${status.detail}`
+      : `${target.statusLabel}: Not checked.`;
   }
   if (el.rocmGuidedCheck) {
     el.rocmGuidedCheck.disabled = state.rocmGuidedBusy;
-    el.rocmGuidedCheck.textContent = state.rocmGuidedBusy ? "Checking..." : "Check ROCm";
+    el.rocmGuidedCheck.textContent = state.rocmGuidedBusy ? "Checking..." : target.checkLabel;
   }
   if (el.rocmGuidedInstall) {
-    const installBlocked = state.rocmGuidedBusy || status?.supported === false || status?.amd_detected === false;
+    const gpuDetected = !statusMatchesTarget ? true : status?.[target.detectedField] !== false;
+    const installBlocked = state.rocmGuidedBusy || (statusMatchesTarget && status?.supported === false) || !gpuDetected;
     el.rocmGuidedInstall.disabled = installBlocked;
-    el.rocmGuidedInstall.textContent = state.rocmGuidedBusy ? "Running Setup..." : "Guided ROCm Setup";
+    el.rocmGuidedInstall.textContent = state.rocmGuidedBusy ? "Running Setup..." : target.installLabel;
   }
 }
 
 async function refreshRocmGuidedStatus(logResult = false) {
   if (!invoke) return null;
+  const target = currentGuidedAccelTarget();
+  if (!target) {
+    state.rocmGuidedStatus = null;
+    updateRocmGuidedUi();
+    return null;
+  }
   state.rocmGuidedBusy = true;
   updateRocmGuidedUi();
   try {
-    const status = await invoke("get_rocm_guided_status");
-    state.rocmGuidedStatus = status || null;
+    const status = await invoke(target.checkCommand);
+    state.rocmGuidedStatus = status ? { ...status, target: target.key } : null;
     if (logResult && status?.detail) {
-      logComfyLine(`ROCm check: ${status.detail}`);
+      logComfyLine(`${target.logPrefix} check: ${status.detail}`);
     }
     return status;
   } catch (err) {
     state.rocmGuidedStatus = {
-      detail: `Failed to check ROCm status: ${err}`,
+      detail: `Failed to check ${target.logPrefix} status: ${err}`,
       supported: false,
-      amd_detected: state.comfyDetectedGpuVendor === "amd",
+      [target.detectedField]: true,
+      target: target.key,
     };
     if (logResult) {
       logComfyLine(String(state.rocmGuidedStatus.detail));
@@ -586,6 +640,10 @@ function resetComfySelectionsToDefaults() {
   if (el.flagSageAttention) el.flagSageAttention.checked = false;
   if (el.flagFlashAttention) el.flagFlashAttention.checked = false;
   if (el.launchListen) el.launchListen.checked = false;
+  if (el.flagLowvram) el.flagLowvram.checked = false;
+  if (el.flagBf16Unet) el.flagBf16Unet.checked = false;
+  if (el.flagAsyncOffload) el.flagAsyncOffload.checked = false;
+  if (el.flagDisableSmartMemory) el.flagDisableSmartMemory.checked = false;
 
   if (el.nodeComfyuiManager) el.nodeComfyuiManager.checked = false;
   if (el.nodeComfyuiEasyUse) el.nodeComfyuiEasyUse.checked = false;
@@ -611,6 +669,9 @@ async function loadInstalledAddonState(comfyuiRoot) {
     if (installedTorchProfile && comfyTorchProfiles.some((x) => x.value === installedTorchProfile)) {
       el.comfyTorchProfile.value = installedTorchProfile;
       state.comfyTorchProfileLocked = true;
+      if (state.comfyMode === "manage") {
+        logComfyLine(`Selected install is using ${torchProfileLabel(installedTorchProfile)}.`);
+      }
     }
     if (el.addonSageAttention) el.addonSageAttention.checked = Boolean(installed?.sage_attention);
     if (el.addonSageAttention3) el.addonSageAttention3.checked = Boolean(installed?.sage_attention3);
@@ -625,6 +686,10 @@ async function loadInstalledAddonState(comfyuiRoot) {
     }
     if (el.flagFlashAttention) el.flagFlashAttention.checked = Boolean(installed?.launch_flash_attention);
     if (el.launchListen) el.launchListen.checked = Boolean(installed?.listen_enabled);
+    if (el.flagLowvram) el.flagLowvram.checked = Boolean(installed?.lowvram_enabled);
+    if (el.flagBf16Unet) el.flagBf16Unet.checked = Boolean(installed?.bf16_unet_enabled);
+    if (el.flagAsyncOffload) el.flagAsyncOffload.checked = Boolean(installed?.async_offload_enabled);
+    if (el.flagDisableSmartMemory) el.flagDisableSmartMemory.checked = Boolean(installed?.disable_smart_memory_enabled);
 
     if (el.nodeComfyuiManager) el.nodeComfyuiManager.checked = Boolean(installed?.node_comfyui_manager);
     if (el.nodeComfyuiEasyUse) el.nodeComfyuiEasyUse.checked = Boolean(installed?.node_comfyui_easy_use);
@@ -826,11 +891,25 @@ async function applyLaunchAttentionFlagFromToggle(changedBox) {
 
 async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   if (!changedBox || state.comfyComponentBusy) return;
-  if (state.comfyMode !== "manage") {
+  const launchSettingOnly = [
+    "addon_pinned_memory",
+    "pinned_memory",
+    "launch_listen",
+    "addon_launch_listen",
+    "launch_lowvram",
+    "addon_launch_lowvram",
+    "launch_bf16_unet",
+    "addon_launch_bf16_unet",
+    "launch_async_offload",
+    "addon_launch_async_offload",
+    "launch_disable_smart_memory",
+    "addon_launch_disable_smart_memory",
+  ].includes(String(component || "").trim());
+  if (state.comfyMode !== "manage" && !launchSettingOnly) {
     return;
   }
   const root = String(el.comfyRoot.value || "").trim();
-  if (!root) {
+  if (!root && !launchSettingOnly) {
     logComfyLine("Set ComfyUI folder first.");
     changedBox.checked = !changedBox.checked;
     return;
@@ -855,7 +934,7 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
   try {
     const result = await invoke("apply_comfyui_component_toggle", {
       request: {
-        comfyuiRoot: root,
+        comfyuiRoot: root || null,
         component,
         enabled: enabling,
         torchProfile: el.comfyTorchProfile?.value || null,
@@ -878,6 +957,30 @@ async function applyComponentToggleFromCheckbox(changedBox, component, label) {
       try {
         const settings = await invoke("get_settings");
         el.launchListen.checked = settings?.comfyui_listen_enabled === true;
+      } catch (_) {}
+    }
+    if ((component === "launch_lowvram" || component === "addon_launch_lowvram") && el.flagLowvram) {
+      try {
+        const settings = await invoke("get_settings");
+        el.flagLowvram.checked = settings?.comfyui_lowvram_enabled === true;
+      } catch (_) {}
+    }
+    if ((component === "launch_bf16_unet" || component === "addon_launch_bf16_unet") && el.flagBf16Unet) {
+      try {
+        const settings = await invoke("get_settings");
+        el.flagBf16Unet.checked = settings?.comfyui_bf16_unet_enabled === true;
+      } catch (_) {}
+    }
+    if ((component === "launch_async_offload" || component === "addon_launch_async_offload") && el.flagAsyncOffload) {
+      try {
+        const settings = await invoke("get_settings");
+        el.flagAsyncOffload.checked = settings?.comfyui_async_offload_enabled === true;
+      } catch (_) {}
+    }
+    if ((component === "launch_disable_smart_memory" || component === "addon_launch_disable_smart_memory") && el.flagDisableSmartMemory) {
+      try {
+        const settings = await invoke("get_settings");
+        el.flagDisableSmartMemory.checked = settings?.comfyui_disable_smart_memory_enabled === true;
       } catch (_) {}
     }
     state.comfyComponentBusy = false;
@@ -1225,13 +1328,14 @@ async function syncComfyInstallSelection(
 function renderPreflight(result) {
   if (!el.preflightList || !el.preflightSummary) return;
   const items = Array.isArray(result?.items) ? result.items : [];
+  const profileSummary = result?.torchProfileLabel ? `Profile: ${result.torchProfileLabel}.` : "";
   el.preflightList.innerHTML = "";
   if (!items.length) {
     const msg = document.createElement("div");
     msg.className = "empty-msg";
     msg.textContent = "No checks executed yet.";
     el.preflightList.appendChild(msg);
-    el.preflightSummary.textContent = "Not run yet.";
+    el.preflightSummary.textContent = profileSummary || "Not run yet.";
     state.comfyPreflightOk = null;
     return;
   }
@@ -1250,19 +1354,27 @@ function renderPreflight(result) {
   });
 
   state.comfyPreflightOk = Boolean(result?.ok);
-  el.preflightSummary.textContent = result?.summary || (state.comfyPreflightOk ? "Preflight passed." : "Preflight has issues.");
+  const baseSummary = result?.summary || (state.comfyPreflightOk ? "Preflight passed." : "Preflight has issues.");
+  el.preflightSummary.textContent = profileSummary ? `${baseSummary} ${profileSummary}` : baseSummary;
 }
 
 async function runComfyPreflight() {
   try {
     const request = buildComfyInstallRequest();
+    const profileLabel = torchProfileLabel(request.torchProfile);
+    logComfyLine(
+      state.comfyMode === "manage"
+        ? `Running preflight for the selected install using ${profileLabel}.`
+        : `Running preflight using ${profileLabel}.`,
+    );
     const result = await invoke("run_comfyui_preflight", { request });
-    renderPreflight(result);
+    renderPreflight({ ...result, torchProfileLabel: profileLabel });
     return result;
   } catch (err) {
     renderPreflight({
       ok: false,
       summary: "Preflight failed to run.",
+      torchProfileLabel: torchProfileLabel(el.comfyTorchProfile?.value || ""),
       items: [{ status: "fail", title: "Preflight runtime", detail: String(err) }],
     });
     return null;
@@ -1346,7 +1458,7 @@ async function startComfyInstall(forceFresh) {
 
 function applyComfyAddonRules() {
   const profile = String(el.comfyTorchProfile?.value || "").trim();
-  const rocmSelected = profile === "torch291_rocm64";
+  const nonCudaSelected = profile === "torch291_rocm64" || profile === "torch291_xpu";
 
   if (el.addonSageAttention3) {
     const wasChecked = el.addonSageAttention3.checked;
@@ -1373,8 +1485,8 @@ function applyComfyAddonRules() {
   ].forEach((box) => {
     if (!box) return;
     const wasChecked = box.checked;
-    box.disabled = rocmSelected;
-    if (rocmSelected && wasChecked) {
+    box.disabled = nonCudaSelected;
+    if (nonCudaSelected && wasChecked) {
       box.checked = false;
     }
   });
@@ -1382,8 +1494,8 @@ function applyComfyAddonRules() {
   [el.flagSageAttention, el.flagFlashAttention].forEach((box) => {
     if (!box) return;
     const wasChecked = box.checked;
-    box.disabled = rocmSelected;
-    if (rocmSelected && wasChecked) {
+    box.disabled = nonCudaSelected;
+    if (nonCudaSelected && wasChecked) {
       box.checked = false;
     }
   });
@@ -1784,10 +1896,16 @@ function comfyTorchProfileOptionsForDetectedGpu() {
       disabled: item.value !== "torch291_rocm64",
     }));
   }
+  if (vendor === "intel") {
+    return comfyTorchProfiles.map((item) => ({
+      ...item,
+      disabled: item.value !== "torch291_xpu",
+    }));
+  }
   if (vendor === "nvidia") {
     return comfyTorchProfiles.map((item) => ({
       ...item,
-      disabled: item.value === "torch291_rocm64",
+      disabled: item.value === "torch291_rocm64" || item.value === "torch291_xpu",
     }));
   }
   return comfyTorchProfiles.map((item) => ({ ...item, disabled: false }));
@@ -1797,12 +1915,20 @@ function applyComfyTorchProfileOptions(selectedValue = null) {
   if (!el.comfyTorchProfile) return;
   const options = comfyTorchProfileOptionsForDetectedGpu();
   const vendor = String(state.comfyDetectedGpuVendor || "").toLowerCase();
-  const forcedValue = vendor === "amd" ? "torch291_rocm64" : selectedValue;
+  const forcedValue = vendor === "amd"
+    ? "torch291_rocm64"
+    : (vendor === "intel" ? "torch291_xpu" : selectedValue);
   setOptions(el.comfyTorchProfile, options, forcedValue);
   if (vendor === "amd") {
     el.comfyTorchProfile.value = "torch291_rocm64";
-  } else if (vendor === "nvidia" && el.comfyTorchProfile.value === "torch291_rocm64") {
+  } else if (vendor === "intel") {
+    el.comfyTorchProfile.value = "torch291_xpu";
+  } else if (
+    vendor === "nvidia"
+    && (el.comfyTorchProfile.value === "torch291_rocm64" || el.comfyTorchProfile.value === "torch291_xpu")
+  ) {
     const fallback = selectedValue && selectedValue !== "torch291_rocm64"
+      && selectedValue !== "torch291_xpu"
       ? selectedValue
       : "torch280_cu128";
     el.comfyTorchProfile.value = fallback;
@@ -2009,23 +2135,28 @@ async function bootstrap() {
         const ramText = `${ramGb != null ? ramGb.toFixed(1) : "?"} GB RAM`;
         const amdGpu = String(snapshot.amd_gpu_name || "").trim();
         const nvidiaGpu = String(snapshot.nvidia_gpu_name || "").trim();
-        state.comfyDetectedGpuVendor = amdGpu ? "amd" : (nvidiaGpu ? "nvidia" : "");
-        const gpuText = amdGpu
-          ? `AMD GPU: ${amdGpu}`
-          : (nvidiaGpu
-            ? `${nvidiaGpu}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
-            : "GPU: Not detected");
+        const intelGpu = String(snapshot.intel_gpu_name || "").trim();
+        state.comfyDetectedGpuVendor = nvidiaGpu ? "nvidia" : (amdGpu ? "amd" : (intelGpu ? "intel" : ""));
+        const gpuText = nvidiaGpu
+          ? `${nvidiaGpu}${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb) ? ` (${formatVramMbToGb(snapshot.nvidia_gpu_vram_mb)})` : ""}`
+          : (amdGpu
+            ? `AMD GPU: ${amdGpu}`
+            : (intelGpu
+              ? `Intel GPU: ${intelGpu}`
+              : "GPU: Not detected"));
         state.appVersion = snapshot.version || state.appVersion;
         state.titleSystemText = `${ramText}${DOT_SEP}${gpuText}`;
         applyComfyTorchProfileOptions(el.comfyTorchProfile?.value || null);
         applyComfyAddonRules();
         updateRocmGuidedUi();
-        if ((amdGpu || String(el.comfyTorchProfile?.value || "").trim() === "torch291_rocm64") && !state.rocmGuidedStatus) {
+        if ((amdGpu || intelGpu
+          || String(el.comfyTorchProfile?.value || "").trim() === "torch291_rocm64"
+          || String(el.comfyTorchProfile?.value || "").trim() === "torch291_xpu") && !state.rocmGuidedStatus) {
           refreshRocmGuidedStatus(false).catch(() => {});
         }
         renderAppVersionTag();
         renderTitleMeta();
-        if (!amdGpu && !nvidiaGpu && attempt < 8) {
+        if (!amdGpu && !nvidiaGpu && !intelGpu && attempt < 8) {
           setTimeout(() => refreshSnapshot(attempt + 1), 600);
         }
       })
@@ -2072,6 +2203,18 @@ async function bootstrap() {
   if (el.launchListen) {
     el.launchListen.checked = settings.comfyui_listen_enabled === true;
   }
+  if (el.flagLowvram) {
+    el.flagLowvram.checked = settings.comfyui_lowvram_enabled === true;
+  }
+  if (el.flagBf16Unet) {
+    el.flagBf16Unet.checked = settings.comfyui_bf16_unet_enabled === true;
+  }
+  if (el.flagAsyncOffload) {
+    el.flagAsyncOffload.checked = settings.comfyui_async_offload_enabled === true;
+  }
+  if (el.flagDisableSmartMemory) {
+    el.flagDisableSmartMemory.checked = settings.comfyui_disable_smart_memory_enabled === true;
+  }
   if (el.enableHfXet) {
     el.enableHfXet.checked = settings.hf_xet_enabled === true;
   }
@@ -2082,6 +2225,7 @@ async function bootstrap() {
     savedTorchProfile
     && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)
     && state.comfyDetectedGpuVendor !== "amd"
+    && state.comfyDetectedGpuVendor !== "intel"
   ) {
     el.comfyTorchProfile.value = savedTorchProfile;
     state.comfyTorchProfileLocked = true;
@@ -2094,14 +2238,16 @@ async function bootstrap() {
         const recoReason = String(reco.reason || "").toLowerCase();
         state.comfyTorchRecommendedBase = recoReason.includes("detected amd gpu")
           ? "Detected AMD GPU. Auto-selected 'Torch 2.9.1 + ROCm 6.4'."
+          : (recoReason.includes("detected intel gpu")
+            ? "Detected Intel GPU. Auto-selected 'Torch 2.9.1 + XPU'."
           : (recoReason.includes("non-nvidia")
             ? "Recommended 'Torch 2.8.0 + cu128' for NVIDIA GPUs. For AMD, Torch 2.9.1 + ROCm 6.4 will be auto-selected."
-            : `Recommended '${reco.torch_label}' for your GPU`);
+            : `Recommended '${reco.torch_label}' for your GPU`));
         setTorchRecommendedDetecting(false);
         state.comfySage3Eligible = String(reco.gpu_name || "").toLowerCase().includes("rtx 50");
         if (
           comfyTorchProfiles.some((x) => x.value === reco.torch_profile)
-          && (state.comfyDetectedGpuVendor === "amd" || !state.comfyTorchProfileLocked)
+          && ((state.comfyDetectedGpuVendor === "amd" || state.comfyDetectedGpuVendor === "intel") || !state.comfyTorchProfileLocked)
         ) {
           applyComfyTorchProfileOptions(reco.torch_profile);
           el.comfyTorchProfile.value = reco.torch_profile;
@@ -2419,12 +2565,12 @@ el.comfyExtraModelRoot?.addEventListener("change", async () => {
 });
 
 el.comfyTorchProfile?.addEventListener("change", async () => {
-  if (state.comfyDetectedGpuVendor !== "amd") {
+  if (state.comfyDetectedGpuVendor !== "amd" && state.comfyDetectedGpuVendor !== "intel") {
     state.comfyTorchProfileLocked = true;
   }
   applyComfyAddonRules();
   updateRocmGuidedUi();
-  if (String(el.comfyTorchProfile.value || "").trim() === "torch291_rocm64") {
+  if (["torch291_rocm64", "torch291_xpu"].includes(String(el.comfyTorchProfile.value || "").trim())) {
     await refreshRocmGuidedStatus(false);
   }
 });
@@ -2438,6 +2584,10 @@ el.comfyMode?.addEventListener("change", async () => {
       state.comfyTorchProfileLocked = false;
       applyComfyTorchProfileOptions("torch291_rocm64");
       el.comfyTorchProfile.value = "torch291_rocm64";
+    } else if (state.comfyDetectedGpuVendor === "intel") {
+      state.comfyTorchProfileLocked = false;
+      applyComfyTorchProfileOptions("torch291_xpu");
+      el.comfyTorchProfile.value = "torch291_xpu";
     } else {
       applyComfyTorchProfileOptions(savedTorchProfile || "torch280_cu128");
       if (savedTorchProfile && comfyTorchProfiles.some((x) => x.value === savedTorchProfile)) {
@@ -2598,27 +2748,45 @@ el.launchListen?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.launchListen, "launch_listen", "--listen")
     .catch((err) => logComfyLine(String(err)));
 });
+el.flagLowvram?.addEventListener("change", () => {
+  applyComponentToggleFromCheckbox(el.flagLowvram, "launch_lowvram", "--lowvram")
+    .catch((err) => logComfyLine(String(err)));
+});
+el.flagBf16Unet?.addEventListener("change", () => {
+  applyComponentToggleFromCheckbox(el.flagBf16Unet, "launch_bf16_unet", "--bf16-unet")
+    .catch((err) => logComfyLine(String(err)));
+});
+el.flagAsyncOffload?.addEventListener("change", () => {
+  applyComponentToggleFromCheckbox(el.flagAsyncOffload, "launch_async_offload", "--async-offload")
+    .catch((err) => logComfyLine(String(err)));
+});
+el.flagDisableSmartMemory?.addEventListener("change", () => {
+  applyComponentToggleFromCheckbox(el.flagDisableSmartMemory, "launch_disable_smart_memory", "--disable-smart-memory")
+    .catch((err) => logComfyLine(String(err)));
+});
 el.rocmGuidedCheck?.addEventListener("click", async () => {
   await refreshRocmGuidedStatus(true);
 });
 el.rocmGuidedInstall?.addEventListener("click", async () => {
+  const target = currentGuidedAccelTarget();
+  if (!target) return;
   state.rocmGuidedBusy = true;
   updateRocmGuidedUi();
-  logComfyLine("Starting guided ROCm setup...");
+  logComfyLine(`Starting guided ${target.logPrefix} setup...`);
   await new Promise((resolve) => {
     window.requestAnimationFrame(() => {
       window.requestAnimationFrame(resolve);
     });
   });
   try {
-    const status = await invoke("install_rocm_guided");
-    state.rocmGuidedStatus = status || null;
+    const status = await invoke(target.installCommand);
+    state.rocmGuidedStatus = status ? { ...status, target: target.key } : null;
     if (status?.detail) {
-      logComfyLine(`ROCm guided setup: ${status.detail}`);
+      logComfyLine(`${target.logPrefix} guided setup: ${status.detail}`);
     }
     await refreshRocmGuidedStatus(false);
   } catch (err) {
-    logComfyLine(`ROCm guided setup failed: ${err}`);
+    logComfyLine(`${target.logPrefix} guided setup failed: ${err}`);
     await refreshRocmGuidedStatus(false);
   } finally {
     state.rocmGuidedBusy = false;
@@ -2752,6 +2920,9 @@ el.checkUpdates.addEventListener("click", async () => {
     return;
   }
   try {
+    state.updateChecking = true;
+    updateUpdateButton();
+    el.updateStatus.textContent = "Checking...";
     const result = await invoke("check_updates_now");
     if (result.available) {
       state.updateAvailable = true;
@@ -2773,6 +2944,9 @@ el.checkUpdates.addEventListener("click", async () => {
     updateUpdateButton();
     el.updateStatus.textContent = "Error";
     logLine(String(err));
+  } finally {
+    state.updateChecking = false;
+    updateUpdateButton();
   }
 });
 

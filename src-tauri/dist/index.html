@@ -119,6 +119,10 @@
           <label title="Launch ComfyUI with SageAttention enabled when SageAttention is installed. Turn this off if you want to keep SageAttention installed but start ComfyUI without it."><input type="checkbox" id="flag-sageattention" /> --use-sage-attention</label>
           <label title="Launch ComfyUI with FlashAttention enabled when FlashAttention is installed. Turn this off if you want to keep FlashAttention installed but start ComfyUI without it."><input type="checkbox" id="flag-flashattention" /> --use-flash-attention</label>
           <label title="Start ComfyUI with the --listen flag so the server binds beyond localhost and can be reached from other devices on your network. Enable this only on networks you trust."><input type="checkbox" id="launch-listen" /> --listen</label>
+          <label title="Enable ComfyUI low VRAM mode for more aggressive memory management on smaller GPUs, usually helpful around 8-16 GB VRAM."><input type="checkbox" id="flag-lowvram" /> --lowvram</label>
+          <label title="Launch ComfyUI with BFloat16 UNet precision for lower VRAM use and potentially faster execution on supported hardware."><input type="checkbox" id="flag-bf16-unet" /> --bf16-unet</label>
+          <label title="Use asynchronous model offloading during ComfyUI execution. This can help some systems smooth out memory pressure but may not benefit every setup."><input type="checkbox" id="flag-async-offload" /> --async-offload</label>
+          <label title="Disable ComfyUI smart memory behavior for more predictable VRAM handling. Useful for troubleshooting or when automatic memory decisions are not helping your workflow."><input type="checkbox" id="flag-disable-smart-memory" /> --disable-smart-memory</label>
         </div>
 
         <div class="row install-action-row">

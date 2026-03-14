@@ -46,6 +46,7 @@ struct AppSnapshot {
     nvidia_gpu_name: Option<String>,
     nvidia_gpu_vram_mb: Option<u64>,
     amd_gpu_name: Option<String>,
+    intel_gpu_name: Option<String>,
     model_count: usize,
     lora_count: usize,
 }
@@ -155,6 +156,18 @@ struct RocmGuidedStatus {
     detail: String,
 }
 
+#[derive(Debug, Serialize)]
+struct XpuGuidedStatus {
+    distro_family: String,
+    distro_label: String,
+    supported: bool,
+    intel_detected: bool,
+    gpu_name: Option<String>,
+    ready: bool,
+    requires_relogin: bool,
+    detail: String,
+}
+
 #[derive(Clone, Debug)]
 struct LinuxPrereqScan {
     distro: String,
@@ -225,6 +238,7 @@ fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
     let catalog = state.context.catalog.catalog_snapshot();
     let (nvidia_gpu_name, nvidia_gpu_vram_mb) = detect_nvidia_gpu();
     let amd_gpu_name = detect_amd_gpu_name();
+    let intel_gpu_name = detect_intel_gpu_name();
     let ram_profile = state.context.ram_profile.or_else(detect_ram_profile);
     AppSnapshot {
         version: state.context.display_version.clone(),
@@ -233,6 +247,7 @@ fn get_app_snapshot(state: State<'_, AppState>) -> AppSnapshot {
         nvidia_gpu_name,
         nvidia_gpu_vram_mb,
         amd_gpu_name,
+        intel_gpu_name,
         model_count: catalog.models.len(),
         lora_count: catalog.loras.len(),
     }
@@ -256,10 +271,17 @@ struct AmdGpuDetails {
     name: Option<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct IntelGpuDetails {
+    name: Option<String>,
+}
+
 static GPU_DETAILS_CACHE: OnceLock<Mutex<Option<NvidiaGpuDetails>>> = OnceLock::new();
 static GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static AMD_GPU_DETAILS_CACHE: OnceLock<Mutex<Option<AmdGpuDetails>>> = OnceLock::new();
 static AMD_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
+static INTEL_GPU_DETAILS_CACHE: OnceLock<Mutex<Option<IntelGpuDetails>>> = OnceLock::new();
+static INTEL_GPU_DETAILS_PROBE_STARTED: AtomicBool = AtomicBool::new(false);
 static TRAY_MENU_ITEMS: OnceLock<Mutex<Option<TrayMenuItems>>> = OnceLock::new();
 static LINUX_PREREQ_CACHE: OnceLock<Mutex<Option<LinuxPrereqScan>>> = OnceLock::new();
 
@@ -278,6 +300,10 @@ fn gpu_details_cache() -> &'static Mutex<Option<NvidiaGpuDetails>> {
 
 fn amd_gpu_details_cache() -> &'static Mutex<Option<AmdGpuDetails>> {
     AMD_GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn intel_gpu_details_cache() -> &'static Mutex<Option<IntelGpuDetails>> {
+    INTEL_GPU_DETAILS_CACHE.get_or_init(|| Mutex::new(None))
 }
 
 fn linux_prereq_cache() -> &'static Mutex<Option<LinuxPrereqScan>> {
@@ -547,6 +573,45 @@ fn query_amd_gpu_details_blocking() -> AmdGpuDetails {
     }
 }
 
+fn query_intel_gpu_details_blocking() -> IntelGpuDetails {
+    #[cfg(not(target_os = "linux"))]
+    {
+        return IntelGpuDetails::default();
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let (stdout, _) = match run_command_capture("lspci", &["-nn"], None) {
+            Ok(out) => out,
+            Err(_) => return IntelGpuDetails::default(),
+        };
+        let line = stdout
+            .lines()
+            .map(str::trim)
+            .find(|line| {
+                let lower = line.to_ascii_lowercase();
+                (lower.contains("vga compatible controller")
+                    || lower.contains("3d controller")
+                    || lower.contains("display controller"))
+                    && (lower.contains("intel corporation")
+                        || lower.contains("intel arc")
+                        || lower.contains("iris xe")
+                        || lower.contains("uhd graphics"))
+            })
+            .unwrap_or_default();
+        if line.is_empty() {
+            return IntelGpuDetails::default();
+        }
+        let name = line
+            .split(": ")
+            .nth(1)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned);
+        IntelGpuDetails { name }
+    }
+}
+
 fn is_nvidia_hopper_sm90() -> bool {
     let gpu = detect_nvidia_gpu_details();
     if gpu
@@ -620,6 +685,31 @@ fn detect_amd_gpu_details() -> AmdGpuDetails {
     AmdGpuDetails::default()
 }
 
+fn detect_intel_gpu_details() -> IntelGpuDetails {
+    if let Ok(guard) = intel_gpu_details_cache().lock() {
+        if let Some(details) = guard.clone() {
+            return details;
+        }
+    }
+
+    if !INTEL_GPU_DETAILS_PROBE_STARTED.swap(true, Ordering::SeqCst) {
+        std::thread::spawn(|| {
+            let details = query_intel_gpu_details_blocking();
+            let has_data = details.name.is_some();
+            if let Ok(mut guard) = intel_gpu_details_cache().lock() {
+                if has_data {
+                    *guard = Some(details);
+                } else {
+                    *guard = None;
+                    INTEL_GPU_DETAILS_PROBE_STARTED.store(false, Ordering::SeqCst);
+                }
+            }
+        });
+    }
+
+    IntelGpuDetails::default()
+}
+
 fn detect_amd_gpu_name() -> Option<String> {
     if fake_amd_enabled() {
         return Some("Fake AMD GPU (simulation)".to_string());
@@ -630,6 +720,16 @@ fn detect_amd_gpu_name() -> Option<String> {
     detect_amd_gpu_details().name
 }
 
+fn detect_intel_gpu_name() -> Option<String> {
+    if fake_intel_enabled() {
+        return Some("Fake Intel GPU (simulation)".to_string());
+    }
+    if detect_nvidia_gpu_details().name.is_some() || detect_amd_gpu_name().is_some() {
+        return None;
+    }
+    detect_intel_gpu_details().name
+}
+
 fn fake_amd_enabled() -> bool {
     std::env::var("ARCTIC_FAKE_AMD")
         .map(|value| value == "1")
@@ -638,6 +738,18 @@ fn fake_amd_enabled() -> bool {
 
 fn fake_amd_allow_rocm_setup_enabled() -> bool {
     std::env::var("ARCTIC_FAKE_AMD_ALLOW_ROCM_SETUP")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn fake_intel_enabled() -> bool {
+    std::env::var("ARCTIC_FAKE_INTEL")
+        .map(|value| value == "1")
+        .unwrap_or(false)
+}
+
+fn fake_intel_allow_xpu_setup_enabled() -> bool {
+    std::env::var("ARCTIC_FAKE_INTEL_ALLOW_XPU_SETUP")
         .map(|value| value == "1")
         .unwrap_or(false)
 }
@@ -703,6 +815,89 @@ fn rocm_runtime_ready() -> (bool, bool, Vec<String>) {
     (has_rocminfo_bin && has_dev_kfd && rocminfo_ok, requires_relogin, notes)
 }
 
+fn dri_render_node_exists() -> bool {
+    if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("renderD")
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn linux_package_installed_any(distro: &str, packages: &[&str]) -> bool {
+    packages
+        .iter()
+        .any(|package| linux_package_installed(distro, package))
+}
+
+fn xpu_runtime_ready_for_distro(distro: &str) -> (bool, bool, Vec<String>) {
+    let mut notes: Vec<String> = Vec::new();
+    let runtime_packages_ready = match distro {
+        "arch" => {
+            let compute = linux_package_installed("arch", "intel-compute-runtime");
+            let level_zero = linux_package_installed_any("arch", &["level-zero-loader", "level-zero"]);
+            if !compute {
+                notes.push("`intel-compute-runtime` is not installed.".to_string());
+            }
+            if !level_zero {
+                notes.push("Level Zero runtime is not installed.".to_string());
+            }
+            compute && level_zero
+        }
+        "fedora" => {
+            let compute = linux_package_installed("fedora", "intel-compute-runtime");
+            let level_zero =
+                linux_package_installed_any("fedora", &["level-zero", "level-zero-loader"]);
+            if !compute {
+                notes.push("`intel-compute-runtime` is not installed.".to_string());
+            }
+            if !level_zero {
+                notes.push("Level Zero runtime is not installed.".to_string());
+            }
+            compute && level_zero
+        }
+        "debian" => {
+            let opencl = linux_package_installed("debian", "intel-opencl-icd");
+            let level_zero = linux_package_installed_any(
+                "debian",
+                &["intel-level-zero-gpu", "libze-intel-gpu1", "level-zero"],
+            );
+            if !opencl {
+                notes.push("`intel-opencl-icd` is not installed.".to_string());
+            }
+            if !level_zero {
+                notes.push("Intel Level Zero runtime is not installed.".to_string());
+            }
+            opencl && level_zero
+        }
+        _ => false,
+    };
+
+    let has_render_node = dri_render_node_exists();
+    if !has_render_node {
+        notes.push("No `/dev/dri/renderD*` device was found.".to_string());
+    }
+
+    let render_ok = user_in_group("render");
+    let video_ok = user_in_group("video");
+    if !render_ok || !video_ok {
+        notes.push("Current user is not yet in both `render` and `video` groups.".to_string());
+    }
+
+    let requires_relogin = runtime_packages_ready && has_render_node && (!render_ok || !video_ok);
+    (
+        runtime_packages_ready && has_render_node && render_ok && video_ok,
+        requires_relogin,
+        notes,
+    )
+}
+
 fn rocm_supported_for_distro(os: &LinuxOsRelease, family: &str) -> bool {
     match family {
         "arch" | "fedora" => true,
@@ -719,7 +914,28 @@ fn rocm_supported_for_distro(os: &LinuxOsRelease, family: &str) -> bool {
     }
 }
 
+fn xpu_supported_for_distro(_os: &LinuxOsRelease, family: &str) -> bool {
+    matches!(family, "arch" | "fedora" | "debian")
+}
+
 fn emit_rocm_guided_event(app: &AppHandle, phase: &str, message: &str) {
+    let _ = app.emit(
+        "comfyui-install-progress",
+        DownloadProgressEvent {
+            kind: "comfyui_install".to_string(),
+            phase: phase.to_string(),
+            artifact: None,
+            index: None,
+            total: None,
+            received: None,
+            size: None,
+            folder: None,
+            message: Some(message.to_string()),
+        },
+    );
+}
+
+fn emit_xpu_guided_event(app: &AppHandle, phase: &str, message: &str) {
     let _ = app.emit(
         "comfyui-install-progress",
         DownloadProgressEvent {
@@ -990,6 +1206,153 @@ fn install_rocm_guided_internal(app: &AppHandle) -> Result<RocmGuidedStatus, Str
     })
 }
 
+fn install_xpu_guided_internal(app: &AppHandle) -> Result<XpuGuidedStatus, String> {
+    let os = detect_linux_os_release();
+    let family = detect_linux_distro_family();
+    let gpu_name = detect_intel_gpu_name();
+    let supported = xpu_supported_for_distro(&os, &family);
+    let distro_label = if os.pretty_name.trim().is_empty() {
+        family.clone()
+    } else {
+        os.pretty_name.clone()
+    };
+
+    if gpu_name.is_none() {
+        return Ok(XpuGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported,
+            intel_detected: false,
+            gpu_name: None,
+            ready: false,
+            requires_relogin: false,
+            detail: "Intel GPU not detected on this system.".to_string(),
+        });
+    }
+
+    if fake_intel_enabled() && !fake_intel_allow_xpu_setup_enabled() {
+        emit_xpu_guided_event(
+            app,
+            "warn",
+            "Fake Intel mode enabled. Guided Intel setup is disabled to avoid modifying a non-Intel system.",
+        );
+        return Ok(XpuGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported: false,
+            intel_detected: true,
+            gpu_name,
+            ready: false,
+            requires_relogin: false,
+            detail: "Fake Intel mode is active. UI testing is enabled, but guided Intel setup is disabled.".to_string(),
+        });
+    }
+
+    if !supported {
+        return Ok(XpuGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported: false,
+            intel_detected: true,
+            gpu_name,
+            ready: false,
+            requires_relogin: false,
+            detail: "Guided Intel setup is currently supported only for Debian-based, Fedora, and Arch Linux families.".to_string(),
+        });
+    }
+
+    match family.as_str() {
+        "arch" => {
+            let mut steps = vec![
+                "echo Refreshing pacman package metadata for Intel XPU setup...".to_string(),
+                "pacman -Sy".to_string(),
+                "echo Installing Intel XPU runtime packages with pacman...".to_string(),
+                "pacman -S --needed --noconfirm intel-compute-runtime level-zero-loader".to_string(),
+            ];
+            if let Ok(user) = std::env::var("USER") {
+                if !user.trim().is_empty() {
+                    steps.extend(rocm_group_setup_steps(&user));
+                }
+            }
+            run_privileged_shell_streaming(app, &steps.join(" && "), None)?;
+        }
+        "fedora" => {
+            let mut steps = vec![
+                "echo Refreshing dnf metadata for Intel XPU setup...".to_string(),
+                "dnf makecache".to_string(),
+                "echo Installing Intel XPU runtime packages with dnf...".to_string(),
+                "(dnf install -y intel-compute-runtime level-zero || dnf install -y intel-compute-runtime level-zero-loader)".to_string(),
+            ];
+            if let Ok(user) = std::env::var("USER") {
+                if !user.trim().is_empty() {
+                    steps.extend(rocm_group_setup_steps(&user));
+                }
+            }
+            run_privileged_shell_streaming(app, &steps.join(" && "), None)?;
+        }
+        "debian" => {
+            let mut steps = vec![
+                "echo Refreshing apt package metadata for Intel XPU setup...".to_string(),
+                "apt update".to_string(),
+                "echo Installing Intel XPU runtime packages with apt...".to_string(),
+                "apt install -y intel-opencl-icd".to_string(),
+                "if apt-cache show intel-level-zero-gpu >/dev/null 2>&1; then apt install -y intel-level-zero-gpu; elif apt-cache show libze-intel-gpu1 >/dev/null 2>&1; then apt install -y libze-intel-gpu1; elif apt-cache show level-zero >/dev/null 2>&1; then apt install -y level-zero; else echo Warning: no supported Intel Level Zero package was found in apt repositories.; fi".to_string(),
+            ];
+            if let Ok(user) = std::env::var("USER") {
+                if !user.trim().is_empty() {
+                    steps.extend(rocm_group_setup_steps(&user));
+                }
+            }
+            run_privileged_shell_streaming(app, &steps.join(" && "), None)?;
+        }
+        _ => return Err("Unsupported distro family for guided Intel setup.".to_string()),
+    }
+
+    if fake_intel_enabled() && fake_intel_allow_xpu_setup_enabled() {
+        emit_xpu_guided_event(
+            app,
+            "step",
+            "Fake Intel install-test mode is active. Runtime validation is skipped because no real Intel GPU is present. If guided setup changed your groups, log out and back in before real use.",
+        );
+        return Ok(XpuGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported,
+            intel_detected: true,
+            gpu_name,
+            ready: true,
+            requires_relogin: false,
+            detail: "Intel package installation finished. Runtime validation is skipped in fake Intel install-test mode. If guided setup changed your groups, log out and back in before real use.".to_string(),
+        });
+    }
+
+    emit_xpu_guided_event(app, "step", "Checking Intel XPU runtime readiness...");
+    let (ready, requires_relogin, notes) = xpu_runtime_ready_for_distro(&family);
+    let detail = if ready {
+        "Intel XPU runtime looks ready for use. If guided setup changed your groups, log out and back in before launching ComfyUI.".to_string()
+    } else if requires_relogin {
+        "Intel GPU packages installed. Log out and back in, or reboot, then run the Intel XPU check again.".to_string()
+    } else if notes.is_empty() {
+        "Intel guided setup finished. Log out and back in, then run the Intel XPU check again.".to_string()
+    } else {
+        format!(
+            "Intel guided setup finished. Log out and back in, then run the Intel XPU check again. {}",
+            notes.join(" ")
+        )
+    };
+
+    Ok(XpuGuidedStatus {
+        distro_family: family,
+        distro_label,
+        supported,
+        intel_detected: true,
+        gpu_name,
+        ready,
+        requires_relogin,
+        detail,
+    })
+}
+
 #[tauri::command]
 fn get_rocm_guided_status() -> RocmGuidedStatus {
     let os = detect_linux_os_release();
@@ -1044,10 +1407,70 @@ fn get_rocm_guided_status() -> RocmGuidedStatus {
 }
 
 #[tauri::command]
+fn get_xpu_guided_status() -> XpuGuidedStatus {
+    let os = detect_linux_os_release();
+    let family = detect_linux_distro_family();
+    let gpu_name = detect_intel_gpu_name();
+    let supported = xpu_supported_for_distro(&os, &family);
+    let distro_label = if os.pretty_name.trim().is_empty() {
+        family.clone()
+    } else {
+        os.pretty_name.clone()
+    };
+    if fake_intel_enabled() {
+        let allow_real_setup = fake_intel_allow_xpu_setup_enabled();
+        return XpuGuidedStatus {
+            distro_family: family,
+            distro_label,
+            supported: allow_real_setup,
+            intel_detected: true,
+            gpu_name,
+            ready: true,
+            requires_relogin: false,
+            detail: if allow_real_setup {
+                "Fake Intel install-test mode is active. Runtime validation is simulated because no real Intel GPU is present.".to_string()
+            } else {
+                "Fake Intel mode is active. Intel XPU readiness is being simulated for UI/install testing on a non-Intel system.".to_string()
+            },
+        };
+    }
+    let (ready, requires_relogin, notes) = xpu_runtime_ready_for_distro(&family);
+    let detail = if gpu_name.is_none() {
+        "Intel GPU not detected on this system.".to_string()
+    } else if !supported {
+        "Guided Intel setup is not available for this Linux distribution family.".to_string()
+    } else if ready {
+        "Intel XPU runtime looks ready for use.".to_string()
+    } else if requires_relogin {
+        "Intel GPU setup needs a logout/login or reboot, then Check Intel XPU again.".to_string()
+    } else {
+        let _ = notes;
+        "Intel XPU is not ready. Run Guided Intel Setup, then Check Intel XPU again.".to_string()
+    };
+    XpuGuidedStatus {
+        distro_family: family,
+        distro_label,
+        supported,
+        intel_detected: gpu_name.is_some(),
+        gpu_name,
+        ready,
+        requires_relogin,
+        detail,
+    }
+}
+
+#[tauri::command]
 async fn install_rocm_guided(app: AppHandle) -> Result<RocmGuidedStatus, String> {
     tokio::task::spawn_blocking(move || install_rocm_guided_internal(&app))
         .await
         .map_err(|err| format!("ROCm guided setup task failed: {err}"))?
+}
+
+#[tauri::command]
+async fn install_xpu_guided(app: AppHandle) -> Result<XpuGuidedStatus, String> {
+    tokio::task::spawn_blocking(move || install_xpu_guided_internal(&app))
+        .await
+        .map_err(|err| format!("Intel guided setup task failed: {err}"))?
 }
 
 #[tauri::command]
@@ -1061,6 +1484,15 @@ fn get_comfyui_install_recommendation() -> ComfyInstallRecommendation {
             torch_profile: "torch291_rocm64".to_string(),
             torch_label: "Torch 2.9.1 + ROCm 6.4".to_string(),
             reason: "Detected AMD GPU; selecting ROCm install profile.".to_string(),
+        };
+    }
+    if let Some(intel_name) = detect_intel_gpu_name() {
+        return ComfyInstallRecommendation {
+            gpu_name: Some(intel_name),
+            driver_version: None,
+            torch_profile: "torch291_xpu".to_string(),
+            torch_label: "Torch 2.9.1 + XPU".to_string(),
+            reason: "Detected Intel GPU; selecting XPU install profile.".to_string(),
         };
     }
     let driver_major = gpu
@@ -1898,6 +2330,23 @@ fn run_comfyui_preflight(
             );
         }
     }
+    if torch_profile_is_xpu(&selected_profile) {
+        let status = get_xpu_guided_status();
+        if status.ready {
+            push_preflight(&mut items, "pass", "Intel XPU runtime", status.detail);
+        } else if status.requires_relogin {
+            ok = false;
+            push_preflight(
+                &mut items,
+                "fail",
+                "Intel XPU runtime",
+                "Intel GPU setup appears incomplete for the current session. Log out and back in, or reboot, then run the Intel XPU check again.",
+            );
+        } else {
+            ok = false;
+            push_preflight(&mut items, "fail", "Intel XPU runtime", status.detail);
+        }
+    }
     if torch_profile_is_rocm(&selected_profile) {
         let incompatible: Vec<&str> = [
             (request.include_sage_attention, "SageAttention"),
@@ -1924,6 +2373,37 @@ fn run_comfyui_preflight(
                 "ROCm add-on compatibility",
                 format!(
                     "These options are currently CUDA-only in this app and must be disabled for ROCm installs: {}.",
+                    incompatible.join(", ")
+                ),
+            );
+        }
+    }
+    if torch_profile_is_xpu(&selected_profile) {
+        let incompatible: Vec<&str> = [
+            (request.include_sage_attention, "SageAttention"),
+            (request.include_sage_attention3, "SageAttention3"),
+            (request.include_flash_attention, "FlashAttention"),
+            (request.include_nunchaku, "Nunchaku"),
+            (request.include_trellis2, "Trellis2"),
+        ]
+        .into_iter()
+        .filter_map(|(enabled, name)| enabled.then_some(name))
+        .collect();
+        if incompatible.is_empty() {
+            push_preflight(
+                &mut items,
+                "pass",
+                "Intel XPU add-on compatibility",
+                "Selected add-ons are compatible with the Intel XPU install profile.",
+            );
+        } else {
+            ok = false;
+            push_preflight(
+                &mut items,
+                "fail",
+                "Intel XPU add-on compatibility",
+                format!(
+                    "These options are currently CUDA-only in this app and must be disabled for Intel XPU installs: {}.",
                     incompatible.join(", ")
                 ),
             );
@@ -2689,7 +3169,7 @@ fn profile_from_torch_env(root: &Path) -> Result<String, String> {
     cmd.arg("-c").arg(
         "import torch; \
          v = getattr(torch, '__version__', ''); \
-         c = getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ''; \
+         c = getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ('xpu' if hasattr(torch, 'xpu') else ''); \
          print(v); print(c)",
     );
     cmd.current_dir(root);
@@ -2789,6 +3269,7 @@ fn torch_profile_to_packages_linux(
     match profile {
         "torch271_cu128" => ("2.7.1", "0.22.1", "2.7.1", "https://download.pytorch.org/whl/cu128"),
         "torch291_rocm64" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/rocm6.4"),
+        "torch291_xpu" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/xpu"),
         "torch291_cu130" => ("2.9.1", "0.24.1", "2.9.1", "https://download.pytorch.org/whl/cu130"),
         _ => ("2.8.0", "0.23.0", "2.8.0", "https://download.pytorch.org/whl/cu128"),
     }
@@ -2806,6 +3287,9 @@ fn torch_profile_from_versions(torch_v: &str, cuda_v: &str) -> Option<String> {
     if t.starts_with("2.9") && c.starts_with("6.4") {
         return Some("torch291_rocm64".to_string());
     }
+    if t.starts_with("2.9") && c == "xpu" {
+        return Some("torch291_xpu".to_string());
+    }
     if t.starts_with("2.9") && c.starts_with("13.0") {
         return Some("torch291_cu130".to_string());
     }
@@ -2820,8 +3304,16 @@ fn triton_package_for_profile_linux(profile: &str) -> &'static str {
     }
 }
 
+fn triton_package_spec_for_xpu_linux(_profile: &str) -> &'static str {
+    "https://download.pytorch.org/whl/triton_xpu-3.6.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl"
+}
+
 fn torch_profile_is_rocm(profile: &str) -> bool {
     profile.contains("_rocm")
+}
+
+fn torch_profile_is_xpu(profile: &str) -> bool {
+    profile.contains("_xpu")
 }
 
 fn enforce_torch_profile_linux(
@@ -2848,7 +3340,20 @@ fn enforce_torch_profile_linux(
         Some(root),
         &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
     )?;
-    if !torch_profile_is_rocm(profile) {
+    if torch_profile_is_xpu(profile) {
+        run_uv_pip_strict(
+            uv_bin,
+            py_path,
+            &[
+                "install",
+                "--upgrade",
+                "--reinstall",
+                triton_package_spec_for_xpu_linux(profile),
+            ],
+            Some(root),
+            &[("UV_PYTHON_INSTALL_DIR", uv_python_install_dir)],
+        )?;
+    } else if !torch_profile_is_rocm(profile) {
         run_uv_pip_strict(
             uv_bin,
             py_path,
@@ -2866,7 +3371,7 @@ fn enforce_torch_profile_linux(
     verify_cmd.arg("-c").arg(
         "import torch, importlib.metadata as m; \
          print(getattr(torch, '__version__', '')); \
-         print(getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ''); \
+         print(getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ('xpu' if hasattr(torch, 'xpu') else '')); \
          print(m.version('torchvision')); \
          print(m.version('torchaudio'))",
     );
@@ -2899,7 +3404,7 @@ fn infer_torch_profile_from_installed_packages(root: &Path) -> Option<String> {
     cmd.arg("-c").arg(
         "import importlib.metadata as m, torch; \
          ta = m.version('torchaudio') if m else ''; \
-         c = getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ''; \
+         c = getattr(torch.version, 'cuda', '') or getattr(torch.version, 'hip', '') or ('xpu' if hasattr(torch, 'xpu') else ''); \
          print(ta); print(c)",
     );
     cmd.current_dir(root);
@@ -2919,6 +3424,9 @@ fn infer_torch_profile_from_installed_packages(root: &Path) -> Option<String> {
     }
     if ta_v.starts_with("2.9") && cuda_v.starts_with("6.4") {
         return Some("torch291_rocm64".to_string());
+    }
+    if ta_v.starts_with("2.9") && cuda_v == "xpu" {
+        return Some("torch291_xpu".to_string());
     }
     if ta_v.starts_with("2.9") && cuda_v.starts_with("13.0") {
         return Some("torch291_cu130".to_string());
@@ -3180,10 +3688,26 @@ fn comfyui_launch_args(
     listen_enabled: bool,
     pinned_memory_enabled: bool,
     attention_backend: Option<&str>,
+    lowvram_enabled: bool,
+    bf16_unet_enabled: bool,
+    async_offload_enabled: bool,
+    disable_smart_memory_enabled: bool,
 ) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if listen_enabled {
         args.push("--listen".to_string());
+    }
+    if lowvram_enabled {
+        args.push("--lowvram".to_string());
+    }
+    if bf16_unet_enabled {
+        args.push("--bf16-unet".to_string());
+    }
+    if async_offload_enabled {
+        args.push("--async-offload".to_string());
+    }
+    if disable_smart_memory_enabled {
+        args.push("--disable-smart-memory".to_string());
     }
     if !pinned_memory_enabled {
         args.push("--disable-pinned-memory".to_string());
@@ -5237,6 +5761,10 @@ fn start_comfyui_root_impl(
         settings.comfyui_listen_enabled,
         settings.comfyui_pinned_memory_enabled,
         effective_attention.as_deref(),
+        settings.comfyui_lowvram_enabled,
+        settings.comfyui_bf16_unet_enabled,
+        settings.comfyui_async_offload_enabled,
+        settings.comfyui_disable_smart_memory_enabled,
     );
     emit_comfyui_runtime_event(
         app,
@@ -5432,6 +5960,10 @@ struct ComfyRuntimeEvent {
 struct ComfyAddonState {
     torch_profile: Option<String>,
     listen_enabled: bool,
+    lowvram_enabled: bool,
+    bf16_unet_enabled: bool,
+    async_offload_enabled: bool,
+    disable_smart_memory_enabled: bool,
     launch_sage_attention: bool,
     launch_sage_attention3: bool,
     launch_flash_attention: bool,
@@ -5766,6 +6298,11 @@ fn get_comfyui_addon_state(
             }
         }),
         listen_enabled: same_as_configured_root && settings.comfyui_listen_enabled,
+        lowvram_enabled: same_as_configured_root && settings.comfyui_lowvram_enabled,
+        bf16_unet_enabled: same_as_configured_root && settings.comfyui_bf16_unet_enabled,
+        async_offload_enabled: same_as_configured_root && settings.comfyui_async_offload_enabled,
+        disable_smart_memory_enabled: same_as_configured_root
+            && settings.comfyui_disable_smart_memory_enabled,
         launch_sage_attention: launch_attention == "sage",
         launch_sage_attention3: launch_attention == "sage3",
         launch_flash_attention: launch_attention == "flash",
@@ -6289,25 +6826,22 @@ async fn apply_comfyui_component_toggle(
     request: ComfyComponentToggleRequest,
 ) -> Result<String, String> {
     let was_running = stop_comfyui_for_mutation(&app, &state)?;
-    let root = resolve_root_path(&state.context, request.comfyui_root)?;
-    let py_path = {
-        let probe = python_for_root(&root);
-        probe.get_program().to_string_lossy().to_string()
-    };
-    let py_exe = PathBuf::from(&py_path);
-    let _ = kill_python_processes_for_root(&root, &py_exe);
     let component = request.component.trim().to_ascii_lowercase();
-
-    let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
-    let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
-    let uv_python_install_dir = shared_runtime_root
-        .join(".python")
-        .to_string_lossy()
-        .to_string();
 
     let result = if matches!(
         component.as_str(),
-        "addon_pinned_memory" | "pinned_memory" | "launch_listen" | "addon_launch_listen"
+        "addon_pinned_memory"
+            | "pinned_memory"
+            | "launch_listen"
+            | "addon_launch_listen"
+            | "launch_lowvram"
+            | "addon_launch_lowvram"
+            | "launch_bf16_unet"
+            | "addon_launch_bf16_unet"
+            | "launch_async_offload"
+            | "addon_launch_async_offload"
+            | "launch_disable_smart_memory"
+            | "addon_launch_disable_smart_memory"
     ) {
         match component.as_str() {
             "addon_pinned_memory" | "pinned_memory" => {
@@ -6336,9 +6870,75 @@ async fn apply_comfyui_component_toggle(
                     Ok("ComfyUI will start without --listen.".to_string())
                 }
             }
+            "launch_lowvram" | "addon_launch_lowvram" => {
+                let enabled = request.enabled;
+                state
+                    .context
+                    .config
+                    .update_settings(|settings| settings.comfyui_lowvram_enabled = enabled)
+                    .map_err(|err| err.to_string())?;
+                if enabled {
+                    Ok("ComfyUI will start with --lowvram enabled.".to_string())
+                } else {
+                    Ok("ComfyUI will start without --lowvram.".to_string())
+                }
+            }
+            "launch_bf16_unet" | "addon_launch_bf16_unet" => {
+                let enabled = request.enabled;
+                state
+                    .context
+                    .config
+                    .update_settings(|settings| settings.comfyui_bf16_unet_enabled = enabled)
+                    .map_err(|err| err.to_string())?;
+                if enabled {
+                    Ok("ComfyUI will start with --bf16-unet enabled.".to_string())
+                } else {
+                    Ok("ComfyUI will start without --bf16-unet.".to_string())
+                }
+            }
+            "launch_async_offload" | "addon_launch_async_offload" => {
+                let enabled = request.enabled;
+                state
+                    .context
+                    .config
+                    .update_settings(|settings| settings.comfyui_async_offload_enabled = enabled)
+                    .map_err(|err| err.to_string())?;
+                if enabled {
+                    Ok("ComfyUI will start with --async-offload enabled.".to_string())
+                } else {
+                    Ok("ComfyUI will start without --async-offload.".to_string())
+                }
+            }
+            "launch_disable_smart_memory" | "addon_launch_disable_smart_memory" => {
+                let enabled = request.enabled;
+                state
+                    .context
+                    .config
+                    .update_settings(|settings| settings.comfyui_disable_smart_memory_enabled = enabled)
+                    .map_err(|err| err.to_string())?;
+                if enabled {
+                    Ok("ComfyUI will start with --disable-smart-memory enabled.".to_string())
+                } else {
+                    Ok("ComfyUI will start without --disable-smart-memory.".to_string())
+                }
+            }
             _ => Err("Unknown component toggle target.".to_string()),
         }
     } else {
+        let root = resolve_root_path(&state.context, request.comfyui_root)?;
+        let py_path = {
+            let probe = python_for_root(&root);
+            probe.get_program().to_string_lossy().to_string()
+        };
+        let py_exe = PathBuf::from(&py_path);
+        let _ = kill_python_processes_for_root(&root, &py_exe);
+
+        let shared_runtime_root = state.context.config.cache_path().join("comfyui-runtime");
+        let uv_bin = resolve_uv_binary(&shared_runtime_root, &app)?;
+        let uv_python_install_dir = shared_runtime_root
+            .join(".python")
+            .to_string_lossy()
+            .to_string();
         let app_clone = app.clone();
         let root_clone = root.clone();
         let py_path_clone = py_path.clone();
@@ -6992,17 +7592,27 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let nerdstats = args.iter().any(|arg| arg.eq_ignore_ascii_case("--nerdstats"));
     let fakeamd = args.iter().any(|arg| arg.eq_ignore_ascii_case("--fakeamd"));
+    let fakeintel = args.iter().any(|arg| arg.eq_ignore_ascii_case("--fakeintel"));
     let fakeamd_allow_rocm_setup = args
         .iter()
         .any(|arg| arg.eq_ignore_ascii_case("--fakeamd-allow-rocm-setup"));
+    let fakeintel_allow_xpu_setup = args
+        .iter()
+        .any(|arg| arg.eq_ignore_ascii_case("--fakeintel-allow-xpu-setup"));
     if nerdstats {
         std::env::set_var("ARCTIC_NERDSTATS", "1");
     }
     if fakeamd {
         std::env::set_var("ARCTIC_FAKE_AMD", "1");
     }
+    if fakeintel {
+        std::env::set_var("ARCTIC_FAKE_INTEL", "1");
+    }
     if fakeamd_allow_rocm_setup {
         std::env::set_var("ARCTIC_FAKE_AMD_ALLOW_ROCM_SETUP", "1");
+    }
+    if fakeintel_allow_xpu_setup {
+        std::env::set_var("ARCTIC_FAKE_INTEL_ALLOW_XPU_SETUP", "1");
     }
     if nerdstats {
         try_attach_parent_console();
@@ -7026,6 +7636,15 @@ fn main() {
             );
         } else {
             log::info!("Fake AMD mode enabled (UI simulation only; guided ROCm setup disabled).");
+        }
+    }
+    if fakeintel {
+        if fakeintel_allow_xpu_setup {
+            log::info!(
+                "Fake Intel mode enabled with real guided Intel setup allowed for testing."
+            );
+        } else {
+            log::info!("Fake Intel mode enabled (UI simulation only; guided Intel setup disabled).");
         }
     }
 
@@ -7088,6 +7707,8 @@ fn main() {
             get_comfyui_install_recommendation,
             get_rocm_guided_status,
             install_rocm_guided,
+            get_xpu_guided_status,
+            install_xpu_guided,
             get_comfyui_resume_state,
             get_comfyui_addon_state,
             apply_attention_backend_change,
