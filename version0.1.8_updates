@@ -1,0 +1,29 @@
+ArcticDownloader 0.1.8 update log
+
+Purpose:
+- Track code changes made in the Linux workspace so they can be mirrored in the Windows workspace.
+
+Format:
+- Date
+- Change summary
+- Files changed
+- Notes
+
+Entries:
+- 2026-03-16
+  - Fixed Linux Intel XPU readiness checks so they no longer require the `video` group to report the runtime as ready.
+  - Files changed:
+    - Cargo.toml
+    - src-tauri/Cargo.toml
+    - src-tauri/src/main.rs
+    - version0.1.8_updates
+  - Notes:
+    - The Intel XPU status check now treats the `render` group as required and the `video` group as optional.
+    - This prevents users from getting stuck on a repeated "log out/login or reboot" message after restart when Intel XPU is otherwise ready.
+- 2026-03-16
+  - Created a human-readable changelog file for version 0.1.8.
+  - Files changed:
+    - CHANGELOG_0.1.8.md
+    - version0.1.8_updates
+  - Notes:
+    - The changelog is written in short release-note style and documents the Linux Intel XPU readiness-check fix.

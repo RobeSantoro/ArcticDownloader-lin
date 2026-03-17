@@ -886,13 +886,15 @@ fn xpu_runtime_ready_for_distro(distro: &str) -> (bool, bool, Vec<String>) {
 
     let render_ok = user_in_group("render");
     let video_ok = user_in_group("video");
-    if !render_ok || !video_ok {
-        notes.push("Current user is not yet in both `render` and `video` groups.".to_string());
+    if !render_ok {
+        notes.push("Current user is not yet in the `render` group.".to_string());
+    } else if !video_ok {
+        notes.push("Current user is not in the `video` group. This is optional for Intel XPU checks, but some media features may still expect it.".to_string());
     }
 
-    let requires_relogin = runtime_packages_ready && has_render_node && (!render_ok || !video_ok);
+    let requires_relogin = runtime_packages_ready && has_render_node && !render_ok;
     (
-        runtime_packages_ready && has_render_node && render_ok && video_ok,
+        runtime_packages_ready && has_render_node && render_ok,
         requires_relogin,
         notes,
     )
