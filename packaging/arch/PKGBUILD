@@ -1,6 +1,6 @@
 # Maintainer: Arctic Latent
 pkgname=arctic-comfyui-helper
-pkgver=0.1.7
+pkgver=0.1.8
 pkgrel=1
 pkgdesc='ComfyUI installer and model manager'
 arch=('x86_64')

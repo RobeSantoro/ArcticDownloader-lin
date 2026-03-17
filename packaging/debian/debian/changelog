@@ -1,3 +1,9 @@
+arctic-comfyui-helper (0.1.8-1) unstable; urgency=medium
+
+  * Fixed a Linux Intel XPU readiness-check issue where the app could keep telling users to log out and back in even after a reboot.
+
+ -- Arctic Latent <contact@arcticlatent.com>  Mon, 16 Mar 2026 21:20:42 -0400
+
 arctic-comfyui-helper (0.1.7-1) unstable; urgency=medium
 
   * Added Linux Intel GPU support for ComfyUI installs with a new `Torch 2.9.1 + XPU` option.
