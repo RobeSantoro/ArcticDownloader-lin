@@ -821,10 +821,6 @@ fn rocm_runtime_ready() -> (bool, bool, Vec<String>) {
     (has_rocminfo_bin && has_dev_kfd && rocminfo_ok, requires_relogin, notes)
 }
 
-fn dri_render_node_exists() -> bool {
-    !dri_render_nodes().is_empty()
-}
-
 fn dri_render_nodes() -> Vec<PathBuf> {
     let mut nodes = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/dev/dri") {
