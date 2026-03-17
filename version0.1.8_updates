@@ -27,3 +27,11 @@ Entries:
     - version0.1.8_updates
   - Notes:
     - The changelog is written in short release-note style and documents the Linux Intel XPU readiness-check fix.
+- 2026-03-17
+  - Refined the Linux Intel XPU readiness check to verify actual render-node access instead of only checking group names.
+  - Files changed:
+    - src-tauri/src/main.rs
+    - version0.1.8_updates
+  - Notes:
+    - The Intel XPU status check now inspects `/dev/dri/renderD*` access directly and uses current-session group detection more robustly.
+    - This should stop false 'log out/login or reboot' warnings on systems where Intel render access is already available.

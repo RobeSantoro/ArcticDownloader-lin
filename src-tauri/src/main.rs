@@ -755,14 +755,20 @@ fn fake_intel_allow_xpu_setup_enabled() -> bool {
 }
 
 fn user_in_group(group: &str) -> bool {
-    let user = std::env::var("USER").unwrap_or_default();
-    if user.is_empty() {
-        return false;
-    }
-    let (stdout, _) = match run_command_capture("id", &["-nG", &user], None) {
-        Ok(out) => out,
-        Err(_) => return false,
-    };
+    let stdout = run_command_capture("id", &["-nG"], None)
+        .ok()
+        .map(|(stdout, _)| stdout)
+        .or_else(|| {
+            let user = std::env::var("USER").unwrap_or_default();
+            if user.is_empty() {
+                None
+            } else {
+                run_command_capture("id", &["-nG", &user], None)
+                    .ok()
+                    .map(|(stdout, _)| stdout)
+            }
+        })
+        .unwrap_or_default();
     stdout
         .split_whitespace()
         .any(|value| value.trim().eq_ignore_ascii_case(group))
@@ -816,18 +822,33 @@ fn rocm_runtime_ready() -> (bool, bool, Vec<String>) {
 }
 
 fn dri_render_node_exists() -> bool {
+    !dri_render_nodes().is_empty()
+}
+
+fn dri_render_nodes() -> Vec<PathBuf> {
+    let mut nodes = Vec::new();
     if let Ok(entries) = std::fs::read_dir("/dev/dri") {
         for entry in entries.flatten() {
-            if entry
+            let path = entry.path();
+            if path
                 .file_name()
-                .to_string_lossy()
-                .starts_with("renderD")
+                .map(|name| name.to_string_lossy().starts_with("renderD"))
+                .unwrap_or(false)
             {
-                return true;
+                nodes.push(path);
             }
         }
     }
-    false
+    nodes
+}
+
+fn path_has_rw_access(path: &Path) -> bool {
+    let shell_check = format!(
+        "test -r {} && test -w {}",
+        shell_single_quote(&path.to_string_lossy()),
+        shell_single_quote(&path.to_string_lossy())
+    );
+    run_command_capture("sh", &["-c", &shell_check], None).is_ok()
 }
 
 fn linux_package_installed_any(distro: &str, packages: &[&str]) -> bool {
@@ -879,22 +900,28 @@ fn xpu_runtime_ready_for_distro(distro: &str) -> (bool, bool, Vec<String>) {
         _ => false,
     };
 
-    let has_render_node = dri_render_node_exists();
+    let render_nodes = dri_render_nodes();
+    let has_render_node = !render_nodes.is_empty();
     if !has_render_node {
         notes.push("No `/dev/dri/renderD*` device was found.".to_string());
     }
 
     let render_ok = user_in_group("render");
     let video_ok = user_in_group("video");
-    if !render_ok {
-        notes.push("Current user is not yet in the `render` group.".to_string());
+    let has_render_access = render_nodes.iter().any(|path| path_has_rw_access(path));
+    if !has_render_access {
+        if !render_ok {
+            notes.push("Current user does not yet have access to `/dev/dri/renderD*`. Log out and back in if group changes were just applied.".to_string());
+        } else {
+            notes.push("Current user is in the `render` group but still cannot access `/dev/dri/renderD*`.".to_string());
+        }
     } else if !video_ok {
         notes.push("Current user is not in the `video` group. This is optional for Intel XPU checks, but some media features may still expect it.".to_string());
     }
 
-    let requires_relogin = runtime_packages_ready && has_render_node && !render_ok;
+    let requires_relogin = runtime_packages_ready && has_render_node && !has_render_access;
     (
-        runtime_packages_ready && has_render_node && render_ok,
+        runtime_packages_ready && has_render_node && has_render_access,
         requires_relogin,
         notes,
     )

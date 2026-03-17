@@ -1,0 +1,23 @@
+ArcticDownloader 0.1.9 update log
+
+Purpose:
+- Track code changes made in the Linux workspace so they can be mirrored in the Windows workspace.
+
+Format:
+- Date
+- Change summary
+- Files changed
+- Notes
+
+Entries:
+- 2026-03-17
+  - Fixed the Linux Intel XPU readiness check so it validates actual render-node access and no longer depends only on Linux group-name heuristics.
+  - Files changed:
+    - Cargo.toml
+    - src-tauri/Cargo.toml
+    - src-tauri/src/main.rs
+    - CHANGELOG_0.1.9.md
+    - version0.1.9_updates
+  - Notes:
+    - The Intel XPU status check now inspects `/dev/dri/renderD*` access directly and uses current-session group detection more robustly.
+    - This should stop false "log out/login or reboot" warnings on Linux Intel systems where render access is already available.
