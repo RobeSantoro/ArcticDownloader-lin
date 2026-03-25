@@ -5784,7 +5784,7 @@ fn start_comfyui_root_impl(
     let py_exe = resolve_start_python_exe(app, state, &root)?;
     let settings = state.context.config.settings();
 
-    let mut cmd = std::process::Command::new(py_exe);
+    let mut cmd = std::process::Command::new(&py_exe);
     if !nerdstats_enabled() {
         apply_background_command_flags(&mut cmd);
     }
@@ -5855,7 +5855,7 @@ fn start_comfyui_root_impl(
             _ => detect_launch_attention_backend_for_root(&root),
         }
     };
-    cmd.arg("-W").arg("ignore::FutureWarning").arg(main_py);
+    cmd.arg("-W").arg("ignore::FutureWarning").arg(&main_py);
     let launch_args = comfyui_launch_args(
         settings.comfyui_listen_enabled,
         settings.comfyui_pinned_memory_enabled,
