@@ -47,6 +47,7 @@ const state = {
 };
 
 let progressSmoothTimer = null;
+let comfyExtraArgsSaveTimer = null;
 
 const ramOptions = [
   { id: "tier_a", label: "Tier A (64 GB+)" },
@@ -147,6 +148,7 @@ const el = {
   flagBf16Unet: document.getElementById("flag-bf16-unet"),
   flagAsyncOffload: document.getElementById("flag-async-offload"),
   flagDisableSmartMemory: document.getElementById("flag-disable-smart-memory"),
+  comfyExtraArgs: document.getElementById("comfy-extra-args"),
   nodeComfyuiManager: document.getElementById("node-comfyui-manager"),
   nodeComfyuiEasyUse: document.getElementById("node-comfyui-easy-use"),
   nodeRgthreeComfy: document.getElementById("node-rgthree-comfy"),
@@ -217,6 +219,24 @@ function logComfyLine(text) {
     .toUpperCase();
   if (!el.comfyInstallLog) return;
   el.comfyInstallLog.textContent = `[${stamp}] ${text}\n` + el.comfyInstallLog.textContent;
+}
+
+async function saveComfyExtraArgs() {
+  if (!el.comfyExtraArgs) return;
+  const value = String(el.comfyExtraArgs.value || "");
+  const settings = await invoke("save_comfyui_extra_args", { value });
+  state.settings = settings;
+}
+
+function scheduleSaveComfyExtraArgs() {
+  if (!el.comfyExtraArgs) return;
+  if (comfyExtraArgsSaveTimer) {
+    window.clearTimeout(comfyExtraArgsSaveTimer);
+  }
+  comfyExtraArgsSaveTimer = window.setTimeout(() => {
+    comfyExtraArgsSaveTimer = null;
+    saveComfyExtraArgs().catch((err) => logComfyLine(`Save extra args failed: ${err}`));
+  }, 350);
 }
 
 function setStartupStatus(text) {
@@ -2215,6 +2235,9 @@ async function bootstrap() {
   if (el.flagDisableSmartMemory) {
     el.flagDisableSmartMemory.checked = settings.comfyui_disable_smart_memory_enabled === true;
   }
+  if (el.comfyExtraArgs) {
+    el.comfyExtraArgs.value = String(settings.comfyui_extra_args || "");
+  }
   if (el.enableHfXet) {
     el.enableHfXet.checked = settings.hf_xet_enabled === true;
   }
@@ -2764,6 +2787,14 @@ el.flagDisableSmartMemory?.addEventListener("change", () => {
   applyComponentToggleFromCheckbox(el.flagDisableSmartMemory, "launch_disable_smart_memory", "--disable-smart-memory")
     .catch((err) => logComfyLine(String(err)));
 });
+el.comfyExtraArgs?.addEventListener("input", () => {
+  scheduleSaveComfyExtraArgs();
+});
+el.comfyExtraArgs?.addEventListener("change", () => {
+  saveComfyExtraArgs()
+    .then(() => logComfyLine("Saved extra ComfyUI args."))
+    .catch((err) => logComfyLine(`Save extra args failed: ${err}`));
+});
 el.rocmGuidedCheck?.addEventListener("click", async () => {
   await refreshRocmGuidedStatus(true);
 });
@@ -2867,6 +2898,7 @@ el.comfyStartInstalled?.addEventListener("click", async () => {
       logComfyLine(stopped ? "ComfyUI stop requested." : "ComfyUI was not running.");
       await refreshComfyRuntimeStatus();
     } else {
+      await saveComfyExtraArgs();
       state.comfyRuntimeTarget = comfyInstallNameFromRoot(path);
       state.comfyRuntimeStarting = true;
       state.comfyRuntimeRunning = false;

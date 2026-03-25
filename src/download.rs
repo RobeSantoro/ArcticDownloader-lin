@@ -174,52 +174,49 @@ impl DownloadManager {
             let artifacts = dedupe_artifacts(resolved.variant.artifacts);
             let total = artifacts.len();
 
-            let mut stream = futures::stream::iter(
-                artifacts
-                    .into_iter()
-                    .enumerate()
-                    .map(|(index, artifact)| {
-                        let download_clients = download_clients.clone();
-                        let comfy_root = comfy_root.clone();
-                        let model_folder = model_folder.clone();
-                        let progress = progress.clone();
-                        let cancel = cancel.clone();
-                        async move {
-                            if is_cancelled(cancel.as_ref()) {
-                                return Err(anyhow!("download cancelled by user"));
-                            }
-                            let artifact_name = artifact.file_name().to_string();
-                            let _ = progress.send(DownloadSignal::Started {
-                                artifact: artifact_name.clone(),
-                                index,
-                                total,
-                                size: artifact.size_bytes,
-                            });
+            let mut stream = futures::stream::iter(artifacts.into_iter().enumerate().map(
+                |(index, artifact)| {
+                    let download_clients = download_clients.clone();
+                    let comfy_root = comfy_root.clone();
+                    let model_folder = model_folder.clone();
+                    let progress = progress.clone();
+                    let cancel = cancel.clone();
+                    async move {
+                        if is_cancelled(cancel.as_ref()) {
+                            return Err(anyhow!("download cancelled by user"));
+                        }
+                        let artifact_name = artifact.file_name().to_string();
+                        let _ = progress.send(DownloadSignal::Started {
+                            artifact: artifact_name.clone(),
+                            index,
+                            total,
+                            size: artifact.size_bytes,
+                        });
 
-                            info!("Starting download: {}", artifact.file_name());
-                            match download_artifact(
-                                &download_clients,
-                                &comfy_root,
-                                &model_folder,
-                                &artifact,
-                                Some((progress.clone(), index, artifact_name.clone())),
-                                xet_enabled,
-                                cancel.as_ref(),
-                            )
-                            .await
-                            {
-                                Ok(outcome) => Ok(outcome),
-                                Err(err) => {
-                                    let _ = progress.send(DownloadSignal::Failed {
-                                        artifact: artifact_name,
-                                        error: err.to_string(),
-                                    });
-                                    Err(err)
-                                }
+                        info!("Starting download: {}", artifact.file_name());
+                        match download_artifact(
+                            &download_clients,
+                            &comfy_root,
+                            &model_folder,
+                            &artifact,
+                            Some((progress.clone(), index, artifact_name.clone())),
+                            xet_enabled,
+                            cancel.as_ref(),
+                        )
+                        .await
+                        {
+                            Ok(outcome) => Ok(outcome),
+                            Err(err) => {
+                                let _ = progress.send(DownloadSignal::Failed {
+                                    artifact: artifact_name,
+                                    error: err.to_string(),
+                                });
+                                Err(err)
                             }
                         }
-                    }),
-            )
+                    }
+                },
+            ))
             .buffer_unordered(1);
 
             while let Some(result) = stream.next().await {
@@ -484,7 +481,10 @@ impl DownloadManager {
             }
             let url = workflow.workflow_json_url.trim().to_string();
             if url.is_empty() {
-                return Err(anyhow!("Workflow {} is missing workflow_json_url", workflow.id));
+                return Err(anyhow!(
+                    "Workflow {} is missing workflow_json_url",
+                    workflow.id
+                ));
             }
 
             let mut file_name = url
@@ -634,9 +634,7 @@ async fn download_artifact(
                 artifact: artifact_name.clone(),
                 index: *index,
                 size: Some(0),
-                folder: dest_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string()),
+                folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(DownloadOutcome {
@@ -674,14 +672,8 @@ async fn download_artifact(
             parsed.file_path
         );
         if xet_enabled && cli_available {
-            match download_via_hf_cli(
-                &parsed,
-                &dest_dir,
-                progress.clone(),
-                xet_size_hint,
-                cancel,
-            )
-            .await
+            match download_via_hf_cli(&parsed, &dest_dir, progress.clone(), xet_size_hint, cancel)
+                .await
             {
                 Ok(dest_path) => {
                     if let Some((sender, index, artifact_name)) = progress {
@@ -689,9 +681,7 @@ async fn download_artifact(
                             artifact: artifact_name,
                             index,
                             size: artifact.size_bytes,
-                            folder: dest_path
-                                .parent()
-                                .map(|p| p.to_string_lossy().to_string()),
+                            folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                         });
                     }
                     return Ok(DownloadOutcome {
@@ -700,7 +690,9 @@ async fn download_artifact(
                         status: DownloadStatus::Downloaded,
                     });
                 }
-                Err(err) => return Err(err.context(format!("hf CLI/Xet download failed for {url}"))),
+                Err(err) => {
+                    return Err(err.context(format!("hf CLI/Xet download failed for {url}")))
+                }
             }
         }
     }
@@ -713,9 +705,7 @@ async fn download_artifact(
         .first()
         .ok_or_else(|| anyhow!("missing HTTP client for downloads"))?;
 
-    if let Ok(Some(metadata)) =
-        fetch_head_metadata(client, &url, None, &initial_file_name).await
-    {
+    if let Ok(Some(metadata)) = fetch_head_metadata(client, &url, None, &initial_file_name).await {
         if let Some(name) = metadata.file_name {
             final_file_name = name;
         }
@@ -734,9 +724,7 @@ async fn download_artifact(
                     artifact: artifact_name.clone(),
                     index: *index,
                     size: Some(0),
-                    folder: dest_path
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string()),
+                    folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                 });
             }
             return Ok(DownloadOutcome {
@@ -776,9 +764,7 @@ async fn download_artifact(
                         artifact: artifact_name.clone(),
                         index,
                         size: Some(total_size),
-                        folder: dest_path
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string()),
+                        folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                     });
                 }
 
@@ -806,8 +792,7 @@ async fn download_artifact(
     if final_file_name == initial_file_name {
         final_file_name = filename_from_headers(response.headers(), &initial_file_name);
     }
-    if accept_ranges {
-    }
+    if accept_ranges {}
     if final_file_name != initial_file_name {
         dest_path = dest_dir.join(&final_file_name);
         if fs::try_exists(&dest_path)
@@ -819,9 +804,7 @@ async fn download_artifact(
                     artifact: artifact_name.clone(),
                     index: *index,
                     size: Some(0),
-                    folder: dest_path
-                        .parent()
-                        .map(|p| p.to_string_lossy().to_string()),
+                    folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                 });
             }
             return Ok(DownloadOutcome {
@@ -859,7 +842,12 @@ async fn download_artifact(
             fs::remove_file(&tmp_path).await.ok();
             return Err(anyhow!("download cancelled by user"));
         }
-        let n = match timeout(std::time::Duration::from_millis(500), reader.read(&mut buffer)).await {
+        let n = match timeout(
+            std::time::Duration::from_millis(500),
+            reader.read(&mut buffer),
+        )
+        .await
+        {
             Ok(Ok(n)) => n,
             Ok(Err(err)) => return Err(err).with_context(|| format!("failed streaming {url}")),
             Err(_) => continue,
@@ -925,9 +913,8 @@ async fn download_artifact(
                 status: DownloadStatus::SkippedExisting,
             });
         }
-        return Err(err).with_context(|| {
-            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
-        });
+        return Err(err)
+            .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path));
     }
 
     log::info!("Finished download: {:?}", dest_path);
@@ -937,9 +924,7 @@ async fn download_artifact(
             artifact: artifact_name.clone(),
             index,
             size: content_length.or(artifact.size_bytes),
-            folder: dest_path
-                .parent()
-                .map(|p| p.to_string_lossy().to_string()),
+            folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
         });
     }
 
@@ -967,9 +952,7 @@ async fn download_direct(
 
     let mut xet_size_hint = None;
     if let Some(client) = clients.first() {
-        if let Ok(Some(metadata)) =
-            fetch_head_metadata(client, &url, auth_token, file_name).await
-        {
+        if let Ok(Some(metadata)) = fetch_head_metadata(client, &url, auth_token, file_name).await {
             xet_size_hint = metadata.content_length;
         }
     }
@@ -983,14 +966,8 @@ async fn download_direct(
             parsed.file_path
         );
         if xet_enabled && cli_available {
-            match download_via_hf_cli(
-                &parsed,
-                dest_dir,
-                progress.clone(),
-                xet_size_hint,
-                cancel,
-            )
-            .await
+            match download_via_hf_cli(&parsed, dest_dir, progress.clone(), xet_size_hint, cancel)
+                .await
             {
                 Ok(path) => {
                     if let Some((sender, index, artifact_name)) = progress {
@@ -1003,7 +980,9 @@ async fn download_direct(
                     }
                     return Ok(path);
                 }
-                Err(err) => return Err(err.context(format!("hf CLI/Xet download failed for {url}"))),
+                Err(err) => {
+                    return Err(err.context(format!("hf CLI/Xet download failed for {url}")))
+                }
             }
         }
     }
@@ -1048,9 +1027,7 @@ async fn download_direct(
                 artifact: artifact_name.clone(),
                 index,
                 size: Some(0),
-                folder: dest_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string()),
+                folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(dest_path);
@@ -1077,9 +1054,7 @@ async fn download_direct(
                         artifact: artifact_name.clone(),
                         index,
                         size: Some(total_size),
-                        folder: dest_path
-                            .parent()
-                            .map(|p| p.to_string_lossy().to_string()),
+                        folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
                     });
                 }
 
@@ -1118,8 +1093,7 @@ async fn download_direct(
     if final_file_name == file_name {
         final_file_name = filename_from_headers(response.headers(), file_name);
     }
-    if accept_ranges {
-    }
+    if accept_ranges {}
 
     let dest_path = dest_dir.join(&final_file_name);
     if fs::try_exists(&dest_path).await.unwrap_or(false) {
@@ -1128,9 +1102,7 @@ async fn download_direct(
                 artifact: artifact_name.clone(),
                 index,
                 size: Some(0),
-                folder: dest_path
-                    .parent()
-                    .map(|p| p.to_string_lossy().to_string()),
+                folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
             });
         }
         return Ok(dest_path);
@@ -1193,12 +1165,7 @@ async fn download_direct(
         .with_context(|| format!("failed flushing {:?}", tmp_path))?;
     drop(file);
 
-    if looks_like_non_binary_payload(
-        content_type.as_deref(),
-        &sniff,
-        received,
-        &final_file_name,
-    ) {
+    if looks_like_non_binary_payload(content_type.as_deref(), &sniff, received, &final_file_name) {
         fs::remove_file(&tmp_path).await.ok();
         if url.contains("civitai.com") {
             if auth_token.is_some() {
@@ -1225,9 +1192,8 @@ async fn download_direct(
             fs::remove_file(&tmp_path).await.ok();
             return Ok(dest_path);
         }
-        return Err(err).with_context(|| {
-            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
-        });
+        return Err(err)
+            .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path));
     }
 
     if let Some((sender, index, artifact_name)) = progress {
@@ -1235,9 +1201,7 @@ async fn download_direct(
             artifact: artifact_name.clone(),
             index,
             size: content_length,
-            folder: dest_path
-                .parent()
-                .map(|p| p.to_string_lossy().to_string()),
+            folder: dest_path.parent().map(|p| p.to_string_lossy().to_string()),
         });
     }
 
@@ -1502,8 +1466,7 @@ async fn download_ranged_to_file(
                 file.write_all(&buffer[..n])
                     .await
                     .with_context(|| format!("failed writing to {:?}", tmp_path))?;
-                let new_total =
-                    received.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+                let new_total = received.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
                 bytes_since += n as u64;
                 adapt_buffer_size(&mut buffer, &mut bytes_since, &mut last_adjust);
                 if let (Some((sender, index, _)), Some(name)) =
@@ -1566,9 +1529,8 @@ async fn download_ranged_to_file(
             fs::remove_file(&tmp_path).await.ok();
             return Ok(dest_path);
         }
-        return Err(err).with_context(|| {
-            format!("failed to move {:?} to {:?}", tmp_path, dest_path)
-        });
+        return Err(err)
+            .with_context(|| format!("failed to move {:?} to {:?}", tmp_path, dest_path));
     }
 
     Ok(dest_path)
@@ -1764,9 +1726,7 @@ fn parse_hf_resolve_url(url: &str) -> Option<HfResolveUrl> {
 }
 
 fn hf_cli_available() -> bool {
-    *HF_CLI_AVAILABLE.get_or_init(|| {
-        hf_bin_available() || uvx_available()
-    })
+    *HF_CLI_AVAILABLE.get_or_init(|| hf_bin_available() || uvx_available())
 }
 
 fn hf_bin_available() -> bool {
@@ -1835,17 +1795,19 @@ async fn download_via_hf_cli(
     let stage_dir = staging_root.join(format!("job-{stage_id}"));
     if let Some(parent) = Path::new(&parsed.file_path).parent() {
         if parent != Path::new("") {
-            fs::create_dir_all(stage_dir.join(parent)).await.with_context(|| {
-                format!(
-                    "failed to prepare hf staging parent {:?}",
-                    stage_dir.join(parent)
-                )
-            })?;
+            fs::create_dir_all(stage_dir.join(parent))
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to prepare hf staging parent {:?}",
+                        stage_dir.join(parent)
+                    )
+                })?;
         }
     } else {
-        fs::create_dir_all(&stage_dir).await.with_context(|| {
-            format!("failed to create hf staging dir {}", stage_dir.display())
-        })?;
+        fs::create_dir_all(&stage_dir)
+            .await
+            .with_context(|| format!("failed to create hf staging dir {}", stage_dir.display()))?;
     }
 
     let mut cmd = hf_command();
@@ -1972,9 +1934,9 @@ async fn download_via_hf_cli(
 
 async fn move_file_with_fallback(src: &Path, dst: &Path) -> Result<()> {
     if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent).await.with_context(|| {
-            format!("failed to create destination parent {}", parent.display())
-        })?;
+        fs::create_dir_all(parent)
+            .await
+            .with_context(|| format!("failed to create destination parent {}", parent.display()))?;
     }
     match fs::rename(src, dst).await {
         Ok(()) => Ok(()),
@@ -2019,11 +1981,11 @@ async fn cleanup_xet_local_sidecars(dest_dir: &Path, staging_root: &Path) {
     }
 
     // Drop legacy local Hugging Face cache under model folders to avoid duplicate payload usage.
-    let legacy_download_cache = dest_dir
-        .join(".cache")
-        .join("huggingface")
-        .join("download");
-    if fs::try_exists(&legacy_download_cache).await.unwrap_or(false) {
+    let legacy_download_cache = dest_dir.join(".cache").join("huggingface").join("download");
+    if fs::try_exists(&legacy_download_cache)
+        .await
+        .unwrap_or(false)
+    {
         let _ = fs::remove_dir_all(&legacy_download_cache).await;
         if let Some(parent) = legacy_download_cache.parent() {
             remove_empty_parents_until(parent, dest_dir).await;
@@ -2083,7 +2045,10 @@ fn parse_hf_size_token(token: &str) -> Option<u64> {
     let (num_part, mul) = match unit_char {
         'K' | 'k' => (&trimmed[..trimmed.len() - 1], 1024_f64),
         'M' | 'm' => (&trimmed[..trimmed.len() - 1], 1024_f64 * 1024_f64),
-        'G' | 'g' => (&trimmed[..trimmed.len() - 1], 1024_f64 * 1024_f64 * 1024_f64),
+        'G' | 'g' => (
+            &trimmed[..trimmed.len() - 1],
+            1024_f64 * 1024_f64 * 1024_f64,
+        ),
         'T' | 't' => (
             &trimmed[..trimmed.len() - 1],
             1024_f64 * 1024_f64 * 1024_f64 * 1024_f64,
@@ -2097,10 +2062,7 @@ fn parse_hf_size_token(token: &str) -> Option<u64> {
     Some((value * mul) as u64)
 }
 
-async fn hf_downloaded_bytes(
-    dest_dir: &Path,
-    parsed: &HfResolveUrl,
-) -> Option<u64> {
+async fn hf_downloaded_bytes(dest_dir: &Path, parsed: &HfResolveUrl) -> Option<u64> {
     let flat_path = dest_dir.join(&parsed.file_name);
     let nested_path = dest_dir.join(&parsed.file_path);
 
@@ -2147,7 +2109,11 @@ async fn hf_downloaded_bytes(
         }
     }
 
-    if best > 0 { Some(best) } else { None }
+    if best > 0 {
+        Some(best)
+    } else {
+        None
+    }
 }
 
 fn build_download_url(repo: &str, path: &str) -> Result<String> {
@@ -2247,8 +2213,7 @@ async fn fetch_civitai_model_metadata_internal(
         .and_then(|file| file.download_url.clone())
         .or(api_download_url.clone());
 
-    let (preview, preview_url) =
-        resolve_preview(client, &images, token, model_version_id).await;
+    let (preview, preview_url) = resolve_preview(client, &images, token, model_version_id).await;
 
     let mut description = select_richest_description(description, model_description);
     let mut usage_strength = extract_usage_strength(settings.as_ref(), meta.as_ref(), &images);

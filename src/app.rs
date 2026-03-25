@@ -34,39 +34,39 @@ impl AppContext {
 }
 
 pub fn build_context() -> Result<AppContext> {
-        let runtime = Arc::new(
-            Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(|err| anyhow!("failed to create Tokio runtime: {err}"))?,
-        );
+    let runtime = Arc::new(
+        Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(|err| anyhow!("failed to create Tokio runtime: {err}"))?,
+    );
 
-        let config = Arc::new(ConfigStore::new()?);
-        let catalog = Arc::new(CatalogService::new(config.clone())?);
+    let config = Arc::new(ConfigStore::new()?);
+    let catalog = Arc::new(CatalogService::new(config.clone())?);
 
-        // Ensure catalog is always refreshed from remote before the UI boots.
-        if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
-            warn!("Unable to refresh catalog from remote source: {err:#}");
-        } else {
-            info!("Catalog refreshed from remote at startup.");
-        }
+    // Ensure catalog is always refreshed from remote before the UI boots.
+    if let Err(err) = runtime.block_on(catalog.refresh_from_remote()) {
+        warn!("Unable to refresh catalog from remote source: {err:#}");
+    } else {
+        info!("Catalog refreshed from remote at startup.");
+    }
 
-        let display_version = resolve_display_version(&config);
-        let downloads = Arc::new(DownloadManager::new(runtime.clone(), config.clone()));
-        let updater = Arc::new(Updater::new(
-            runtime.clone(),
-            config.clone(),
-            display_version.clone(),
-        )?);
-        Ok(AppContext {
-            runtime,
-            config,
-            catalog,
-            downloads,
-            updater,
-            ram_profile: None,
-            display_version,
-        })
+    let display_version = resolve_display_version(&config);
+    let downloads = Arc::new(DownloadManager::new(runtime.clone(), config.clone()));
+    let updater = Arc::new(Updater::new(
+        runtime.clone(),
+        config.clone(),
+        display_version.clone(),
+    )?);
+    Ok(AppContext {
+        runtime,
+        config,
+        catalog,
+        downloads,
+        updater,
+        ram_profile: None,
+        display_version,
+    })
 }
 
 fn resolve_display_version(_config: &ConfigStore) -> String {

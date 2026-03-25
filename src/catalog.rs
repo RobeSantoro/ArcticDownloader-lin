@@ -162,8 +162,8 @@ impl CatalogService {
                         return Ok(false);
                     }
                 } else {
-                info!("Remote catalog is up to date (HTTP 304).");
-                return Ok(false);
+                    info!("Remote catalog is up to date (HTTP 304).");
+                    return Ok(false);
                 }
             }
             StatusCode::OK => {}

@@ -145,6 +145,8 @@ pub struct AppSettings {
     pub comfyui_async_offload_enabled: bool,
     #[serde(default)]
     pub comfyui_disable_smart_memory_enabled: bool,
+    #[serde(default = "default_comfyui_extra_args")]
+    pub comfyui_extra_args: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub comfyui_attention_backend: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +186,7 @@ impl Default for AppSettings {
             comfyui_bf16_unet_enabled: false,
             comfyui_async_offload_enabled: false,
             comfyui_disable_smart_memory_enabled: false,
+            comfyui_extra_args: default_comfyui_extra_args(),
             comfyui_attention_backend: None,
             comfyui_torch_profile: None,
             hf_xet_enabled: false,
@@ -199,4 +202,20 @@ pub(crate) fn default_catalog_endpoint() -> Option<String> {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_comfyui_extra_args() -> String {
+    [
+        "--listen 0.0.0.0 \\",
+        "--port 8188 \\",
+        "--max-upload-size 10 \\",
+        "--extra-model-paths-config /mnt/AI/COMFY/extra_model_paths.yaml \\",
+        "--user-directory /mnt/AI/COMFY/USER \\",
+        "--input-directory /mnt/AI/COMFY/INPUT/ \\",
+        "--output-directory /mnt/AI/COMFY/OUTPUT \\",
+        "--temp-directory /mnt/AI/COMFY/TEMP \\",
+        "--enable-cors-header http://172.16.10.2:8188 \\",
+        "--verbose INFO",
+    ]
+    .join("\n")
 }

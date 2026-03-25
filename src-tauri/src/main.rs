@@ -2683,6 +2683,13 @@ fn shell_single_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
+fn format_shell_command(program: &Path, args: &[String]) -> String {
+    std::iter::once(shell_single_quote(&program.to_string_lossy()))
+        .chain(args.iter().map(|arg| shell_single_quote(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn rocm_group_setup_steps(user: &str) -> Vec<String> {
     vec![
         "echo Adding current user to render/video groups...".to_string(),
@@ -4611,6 +4618,18 @@ fn set_comfyui_extra_model_config(
 }
 
 #[tauri::command]
+fn save_comfyui_extra_args(
+    state: State<'_, AppState>,
+    value: String,
+) -> Result<AppSettings, String> {
+    state
+        .context
+        .config
+        .update_settings(|settings| settings.comfyui_extra_args = value)
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
 fn save_civitai_token(state: State<'_, AppState>, token: String) -> Result<AppSettings, String> {
     let trimmed = token.trim().to_string();
     state
@@ -4624,6 +4643,61 @@ fn save_civitai_token(state: State<'_, AppState>, token: String) -> Result<AppSe
             };
         })
         .map_err(|err| err.to_string())
+}
+
+fn parse_comfyui_extra_args(raw: &str) -> Result<Vec<String>, String> {
+    let mut args: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut chars = raw.chars().peekable();
+    let mut quote: Option<char> = None;
+
+    while let Some(ch) = chars.next() {
+        match quote {
+            Some(q) => match ch {
+                '\\' if q == '"' => {
+                    let Some(next) = chars.next() else {
+                        return Err("Extra args end with a dangling escape inside quotes.".to_string());
+                    };
+                    current.push(next);
+                }
+                c if c == q => quote = None,
+                _ => current.push(ch),
+            },
+            None => match ch {
+                '\'' | '"' => quote = Some(ch),
+                '\\' => match chars.peek().copied() {
+                    Some('\n') => {
+                        chars.next();
+                    }
+                    Some('\r') => {
+                        chars.next();
+                        if matches!(chars.peek(), Some('\n')) {
+                            chars.next();
+                        }
+                    }
+                    Some(next) => {
+                        current.push(next);
+                        chars.next();
+                    }
+                    None => return Err("Extra args end with a dangling escape.".to_string()),
+                },
+                c if c.is_whitespace() => {
+                    if !current.is_empty() {
+                        args.push(std::mem::take(&mut current));
+                    }
+                }
+                _ => current.push(ch),
+            },
+        }
+    }
+
+    if quote.is_some() {
+        return Err("Extra args contain an unterminated quoted string.".to_string());
+    }
+    if !current.is_empty() {
+        args.push(current);
+    }
+    Ok(args)
 }
 
 #[tauri::command]
@@ -5791,6 +5865,17 @@ fn start_comfyui_root_impl(
         settings.comfyui_async_offload_enabled,
         settings.comfyui_disable_smart_memory_enabled,
     );
+    let extra_args = parse_comfyui_extra_args(&settings.comfyui_extra_args)?;
+    let launch_command = format_shell_command(&py_exe, &{
+        let mut args = vec![
+            "-W".to_string(),
+            "ignore::FutureWarning".to_string(),
+            main_py.to_string_lossy().to_string(),
+        ];
+        args.extend(launch_args.clone());
+        args.extend(extra_args.clone());
+        args
+    });
     emit_comfyui_runtime_event(
         app,
         "launch_args",
@@ -5799,7 +5884,25 @@ fn start_comfyui_root_impl(
             effective_attention.as_deref().unwrap_or("PyTorch attention")
         ),
     );
+    if !extra_args.is_empty() {
+        emit_comfyui_runtime_event(
+            app,
+            "launch_args",
+            format!("Appending extra args: {}", extra_args.join(" ")),
+        );
+    }
+    emit_comfyui_runtime_event(app, "launch_args", format!("Command: {launch_command}"));
+    emit_comfyui_runtime_event(
+        app,
+        "launch_args",
+        format!("Working directory: {}", root.display()),
+    );
+    if nerdstats_enabled() {
+        log::info!("ComfyUI launch command: {launch_command}");
+        log::info!("ComfyUI working directory: {}", root.display());
+    }
     cmd.args(launch_args);
+    cmd.args(extra_args);
     cmd.current_dir(root);
     if nerdstats_enabled() {
         cmd.stdout(Stdio::inherit()).stderr(Stdio::inherit());
@@ -7746,6 +7849,7 @@ fn main() {
             set_hf_xet_enabled,
             set_comfyui_root,
             set_comfyui_install_base,
+            save_comfyui_extra_args,
             get_comfyui_extra_model_config,
             set_comfyui_extra_model_config,
             save_civitai_token,

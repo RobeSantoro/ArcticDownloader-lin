@@ -54,7 +54,10 @@ impl ModelCatalog {
     }
 
     pub fn find_workflow(&self, id: &str) -> Option<WorkflowDefinition> {
-        self.workflows.iter().find(|workflow| workflow.id == id).cloned()
+        self.workflows
+            .iter()
+            .find(|workflow| workflow.id == id)
+            .cloned()
     }
 }
 

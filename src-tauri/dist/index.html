@@ -124,6 +124,18 @@
           <label title="Use asynchronous model offloading during ComfyUI execution. This can help some systems smooth out memory pressure but may not benefit every setup."><input type="checkbox" id="flag-async-offload" /> --async-offload</label>
           <label title="Disable ComfyUI smart memory behavior for more predictable VRAM handling. Useful for troubleshooting or when automatic memory decisions are not helping your workflow."><input type="checkbox" id="flag-disable-smart-memory" /> --disable-smart-memory</label>
         </div>
+        <div class="row section-header">
+          <h3>Extra Args</h3>
+        </div>
+        <div class="row">
+          <textarea
+            id="comfy-extra-args"
+            class="args-textarea"
+            spellcheck="false"
+            placeholder="Additional CLI args appended after the built-in launch flags"
+          ></textarea>
+          <span class="transfer-sub">These args are appended at the end of the ComfyUI command. Supports multiline shell-style args and quoted values.</span>
+        </div>
 
         <div class="row install-action-row">
           <button id="install-comfyui" class="primary">Install ComfyUI</button>

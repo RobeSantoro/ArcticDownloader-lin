@@ -250,7 +250,8 @@ body {
 .preflight-item.fail .status { color: #f07a7a; }
 button,
 select,
-input {
+input,
+textarea {
   width: 100%;
   background: #121621;
   color: var(--text);
@@ -260,6 +261,15 @@ input {
   min-height: 38px;
 }
 button { cursor: pointer; }
+textarea {
+  resize: vertical;
+  min-height: 172px;
+  line-height: 1.45;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.args-textarea {
+  white-space: pre;
+}
 button:hover { border-color: var(--accent); }
 button.stop-state {
   background: linear-gradient(180deg, #8e2d2d, #6f2020);

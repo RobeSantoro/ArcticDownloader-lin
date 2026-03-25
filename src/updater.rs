@@ -302,9 +302,7 @@ fn installer_file_name(url: &str) -> Option<String> {
 }
 
 async fn run_install_command(path: &Path) -> Result<()> {
-    let path = path
-        .canonicalize()
-        .unwrap_or_else(|_| path.to_path_buf());
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let file_name = path
         .file_name()
         .and_then(OsStr::to_str)
@@ -325,7 +323,10 @@ async fn run_install_command(path: &Path) -> Result<()> {
         return Ok(());
     }
     if file_name.ends_with(".src.rpm") {
-        bail!("Refusing to auto-install source RPM update package: {}", path.display());
+        bail!(
+            "Refusing to auto-install source RPM update package: {}",
+            path.display()
+        );
     }
     if file_name.ends_with(".rpm") {
         if let Err(err) = run_privileged_install("dnf", &["install", "-y", &file_arg]).await {
@@ -340,8 +341,7 @@ async fn run_install_command(path: &Path) -> Result<()> {
         return Ok(());
     }
     if file_name.contains(".pkg.tar") {
-        if let Err(err) =
-            run_privileged_install("pacman", &["-U", "--noconfirm", &file_arg]).await
+        if let Err(err) = run_privileged_install("pacman", &["-U", "--noconfirm", &file_arg]).await
         {
             bail!(
                 "Update downloaded, but automatic install failed.\n\
@@ -379,7 +379,10 @@ async fn run_privileged_install(program: &str, args: &[&str]) -> Result<()> {
         Err(err) => attempts.push(format!("sudo {} => {err}", sudo_non_interactive.join(" "))),
     }
 
-    if run_install_command_direct("pkexec", &[program]).await.is_ok() {
+    if run_install_command_direct("pkexec", &[program])
+        .await
+        .is_ok()
+    {
         // Defensive noop for weird pkexec policies that reject direct no-arg checks.
     }
     let mut pkexec_args = vec![program];
@@ -419,10 +422,12 @@ fn can_use_interactive_sudo() -> bool {
 async fn run_install_command_direct(program: &str, args: &[&str]) -> Result<()> {
     let mut cmd = Command::new(program);
     cmd.args(args);
-    let output = cmd
-        .output()
-        .await
-        .with_context(|| format!("failed to run install command: {program} {}", args.join(" ")))?;
+    let output = cmd.output().await.with_context(|| {
+        format!(
+            "failed to run install command: {program} {}",
+            args.join(" ")
+        )
+    })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -459,7 +464,9 @@ fn detect_linux_distro_family() -> String {
         "arch".to_string()
     } else if haystack.contains("debian") || haystack.contains("ubuntu") {
         "debian".to_string()
-    } else if haystack.contains("fedora") || haystack.contains("rhel") || haystack.contains("centos")
+    } else if haystack.contains("fedora")
+        || haystack.contains("rhel")
+        || haystack.contains("centos")
     {
         "fedora".to_string()
     } else {
