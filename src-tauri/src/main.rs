@@ -4654,11 +4654,12 @@ fn parse_comfyui_extra_args(raw: &str) -> Result<Vec<String>, String> {
     while let Some(ch) = chars.next() {
         match quote {
             Some(q) => match ch {
-                '\\' if q == '"' => {
-                    let Some(next) = chars.next() else {
-                        return Err("Extra args end with a dangling escape inside quotes.".to_string());
-                    };
-                    current.push(next);
+                '\\' if q == '"' => match chars.peek().copied() {
+                    Some('"') | Some('\\') => {
+                        current.push(chars.next().unwrap());
+                    }
+                    Some(_) => current.push(ch),
+                    None => current.push(ch),
                 }
                 c if c == q => quote = None,
                 _ => current.push(ch),
@@ -4675,11 +4676,8 @@ fn parse_comfyui_extra_args(raw: &str) -> Result<Vec<String>, String> {
                             chars.next();
                         }
                     }
-                    Some(next) => {
-                        current.push(next);
-                        chars.next();
-                    }
-                    None => return Err("Extra args end with a dangling escape.".to_string()),
+                    Some(_) => current.push(ch),
+                    None => current.push(ch),
                 },
                 c if c.is_whitespace() => {
                     if !current.is_empty() {
